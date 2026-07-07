@@ -123,12 +123,9 @@ namespace VideoKelimeArama
 
                     if (!eslesti && bulanikEsik > 0)
                     {
-                        string kucukKelime = kultur.TextInfo.ToLower(kelime);
                         foreach (string parca in satir.Split(' ', StringSplitOptions.RemoveEmptyEntries))
                         {
-                            string sozcuk = parca.Trim('.', ',', ';', ':', '!', '?', '"', '\'', '(', ')', '[', ']');
-                            if (Math.Abs(sozcuk.Length - kelime.Length) <= bulanikEsik &&
-                                LevenshteinMesafesi(kultur.TextInfo.ToLower(sozcuk), kucukKelime) <= bulanikEsik)
+                            if (SozcukUyuyorMu(parca))
                             {
                                 eslesti = true;
                                 break;
@@ -143,6 +140,26 @@ namespace VideoKelimeArama
                 }
 
                 return null;
+            }
+
+            // Tek bir sözcüğün aranan kelimeyle uyuşup uyuşmadığı (bulanık dahil);
+            // kare üzerinde kelime vurgulama da bunu kullanır
+            public bool SozcukUyuyorMu(string sozcuk)
+            {
+                sozcuk = sozcuk.Trim('.', ',', ';', ':', '!', '?', '"', '\'', '(', ')', '[', ']');
+                if (sozcuk.Length == 0)
+                {
+                    return false;
+                }
+
+                if (kultur.CompareInfo.IndexOf(sozcuk, kelime, CompareOptions.IgnoreCase) >= 0)
+                {
+                    return true;
+                }
+
+                return bulanikEsik > 0 &&
+                       Math.Abs(sozcuk.Length - kelime.Length) <= bulanikEsik &&
+                       LevenshteinMesafesi(kultur.TextInfo.ToLower(sozcuk), kultur.TextInfo.ToLower(kelime)) <= bulanikEsik;
             }
 
             // Satırdaki fazla boşlukları teke indirir, uzunsa sonunu kırpar
@@ -777,7 +794,7 @@ namespace VideoKelimeArama
             using var kaydet = new SaveFileDialog
             {
                 Title = "Sonuçları Kaydet",
-                Filter = "Metin Dosyası (*.txt)|*.txt",
+                Filter = "Metin Dosyası (*.txt)|*.txt|SRT Altyazı (*.srt)|*.srt",
                 FileName = "arama-sonuclari.txt"
             };
 
@@ -786,19 +803,45 @@ namespace VideoKelimeArama
                 return;
             }
 
-            var satirlar = new List<string>
+            var satirlar = new List<string>();
+
+            if (kaydet.FileName.EndsWith(".srt", StringComparison.OrdinalIgnoreCase))
             {
-                $"Video  : {secilenVideoYolu}",
-                $"Aranan : {txtAra.Text}",
-                ""
-            };
-            foreach (object oge in lstAranankelimekarsilik.Items)
+                // SRT: her sonuç 3 saniyelik bir altyazı girdisi olur
+                int no = 1;
+                foreach (object oge in lstAranankelimekarsilik.Items)
+                {
+                    if (oge is not AramaSonucu s)
+                    {
+                        continue;
+                    }
+
+                    satirlar.Add(no.ToString());
+                    satirlar.Add($"{SrtZaman(s.Saniye)} --> {SrtZaman(s.Saniye + 3)}");
+                    satirlar.Add(s.Baglam.Length > 0 ? s.Baglam : s.Kelime);
+                    satirlar.Add("");
+                    no++;
+                }
+            }
+            else
             {
-                satirlar.Add(oge.ToString() ?? "");
+                satirlar.Add($"Video  : {secilenVideoYolu}");
+                satirlar.Add($"Aranan : {txtAra.Text}");
+                satirlar.Add("");
+                foreach (object oge in lstAranankelimekarsilik.Items)
+                {
+                    satirlar.Add(oge.ToString() ?? "");
+                }
             }
 
             System.IO.File.WriteAllLines(kaydet.FileName, satirlar);
             MessageBox.Show("Sonuçlar kaydedildi.");
+        }
+
+        private static string SrtZaman(double saniye)
+        {
+            var t = TimeSpan.FromSeconds(saniye);
+            return $"{(int)t.TotalHours:D2}:{t.Minutes:D2}:{t.Seconds:D2},{t.Milliseconds:D3}";
         }
 
         // Aramanın giriş noktası (arka plan iş parçacığında çalışır):
@@ -955,13 +998,15 @@ namespace VideoKelimeArama
             return dizin;
         }
 
-        // Gri tonlamalı kareyi Tesseract için hazırlayıp metne çevirir
-        private static string KareyiOkut(Mat gri, TesseractEngine tesseract)
+        // Gri kareyi OCR için hazırlar (küçük yazılar için 2x büyütme +
+        // eşikleme). olcekKat, OCR koordinatlarını kare koordinatına
+        // çevirmek için dışarı verilir.
+        private static Pix KareyiOcrIcinHazirla(Mat gri, out int olcekKat)
         {
-            using var islenmis = new Mat();
+            olcekKat = gri.Height < 720 ? 2 : 1;
 
-            // Düşük çözünürlükte küçük yazılar için görüntüyü büyütmek OCR isabetini artırır
-            if (gri.Height < 720)
+            using var islenmis = new Mat();
+            if (olcekKat == 2)
             {
                 CvInvoke.Resize(gri, islenmis, new Size(gri.Width * 2, gri.Height * 2), 0, 0, Inter.Cubic);
             }
@@ -977,8 +1022,13 @@ namespace VideoKelimeArama
             using var bitmap = goruntu.ToBitmap();
             using var bellek = new System.IO.MemoryStream();
             bitmap.Save(bellek, System.Drawing.Imaging.ImageFormat.Png);
+            return Pix.LoadFromMemory(bellek.ToArray());
+        }
 
-            using var pix = Pix.LoadFromMemory(bellek.ToArray());
+        // Gri tonlamalı kareyi Tesseract için hazırlayıp metne çevirir
+        private static string KareyiOkut(Mat gri, TesseractEngine tesseract)
+        {
+            using var pix = KareyiOcrIcinHazirla(gri, out _);
             using Page sayfa = tesseract.Process(pix);
             return sayfa.GetText() ?? string.Empty;
         }
@@ -1013,7 +1063,7 @@ namespace VideoKelimeArama
             }
         }
 
-        private void lstAranankelimekarsilik_SelectedIndexChanged(object sender, EventArgs e)
+        private async void lstAranankelimekarsilik_SelectedIndexChanged(object sender, EventArgs e)
         {
             if (lstAranankelimekarsilik.SelectedItem is not AramaSonucu sonuc || yakalama == null)
             {
@@ -1028,6 +1078,90 @@ namespace VideoKelimeArama
                 progressBarvideo.Value = Math.Min(sonuc.KareNo, progressBarvideo.Maximum);
             }
             lblSure.Text = SureFormatla(sonuc.Saniye);
+
+            // Kareyi beklemeden göster; kelime ekranda bulunursa kutu içine al
+            if (!string.IsNullOrWhiteSpace(secilenVideoYolu))
+            {
+                string videoYolu = secilenVideoYolu;
+                Size alan = pictureBox1.ClientSize;
+                Bitmap? goruntu = await Task.Run(() => KareyiVurgula(videoYolu, sonuc.KareNo, sonuc.Kelime, alan));
+                if (goruntu != null)
+                {
+                    pictureBox1.Image?.Dispose();
+                    pictureBox1.Image = goruntu;
+                }
+            }
+        }
+
+        // Verilen kareyi görüntüleme boyutunda çizer; aranan kelime karede
+        // OCR ile bulunabilirse çevresine vurgu kutusu ekler (ses sonuçları
+        // gibi kelimenin ekranda olmadığı karelerde sade kare gösterilir)
+        private static Bitmap? KareyiVurgula(string videoYolu, int kareNo, string kelime, Size alan)
+        {
+            if (alan.Width < 8 || alan.Height < 8)
+            {
+                return null;
+            }
+
+            using var video = new VideoCapture(videoYolu);
+            video.Set(CapProp.PosFrames, kareNo);
+            using var kare = new Mat();
+            if (!video.Read(kare) || kare.IsEmpty)
+            {
+                return null;
+            }
+
+            double olcek = Math.Min((double)alan.Width / kare.Width, (double)alan.Height / kare.Height);
+            var hedef = new Size(Math.Max(1, (int)(kare.Width * olcek)), Math.Max(1, (int)(kare.Height * olcek)));
+            using var boyutlu = new Mat();
+            CvInvoke.Resize(kare, boyutlu, hedef);
+            using var img = boyutlu.ToImage<Bgr, byte>();
+            Bitmap bitmap = img.ToBitmap();
+
+            try
+            {
+                using var gri = new Mat();
+                CvInvoke.CvtColor(kare, gri, ColorConversion.Bgr2Gray);
+                using var pix = KareyiOcrIcinHazirla(gri, out int ocrKat);
+
+                using var tesseract = new TesseractEngine(@"./tessdata", "tur", EngineMode.Default);
+                tesseract.DefaultPageSegMode = PageSegMode.SparseText;
+                using Page sayfa = tesseract.Process(pix);
+                using ResultIterator dolasici = sayfa.GetIterator();
+                dolasici.Begin();
+
+                var eslestirici = new KelimeEslestirici(kelime);
+                using var cizim = Graphics.FromImage(bitmap);
+                using var kalem = new Pen(Tema.Vurgu, 3);
+
+                do
+                {
+                    if (!dolasici.TryGetBoundingBox(PageIteratorLevel.Word, out Rect kutu))
+                    {
+                        continue;
+                    }
+
+                    string sozcuk = dolasici.GetText(PageIteratorLevel.Word)?.Trim() ?? "";
+                    if (!eslestirici.SozcukUyuyorMu(sozcuk))
+                    {
+                        continue;
+                    }
+
+                    // OCR koordinatı -> kare -> görüntüleme boyutu
+                    double kat = olcek / ocrKat;
+                    var cerceve = new Rectangle(
+                        (int)(kutu.X1 * kat), (int)(kutu.Y1 * kat),
+                        (int)(kutu.Width * kat), (int)(kutu.Height * kat));
+                    cerceve.Inflate(5, 5);
+                    cizim.DrawRectangle(kalem, cerceve);
+                } while (dolasici.Next(PageIteratorLevel.Word));
+            }
+            catch
+            {
+                // Vurgu çizilemezse (tessdata eksik vb.) sade kare gösterilir
+            }
+
+            return bitmap;
         }
 
         private void btnOynat_Click(object sender, EventArgs e)
