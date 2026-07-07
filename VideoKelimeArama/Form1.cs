@@ -24,6 +24,7 @@ namespace VideoKelimeArama
         // akışının sıçramalı konumu yalnızca büyük sapmada düzeltme için okunur
         private readonly System.Diagnostics.Stopwatch oynatmaSaati = new();
         private double oynatmaSaatiTaban; // saat sıfırlandığında medyanın bulunduğu saniye
+        private float sesDuzeyi = 1f;     // 0..1; yeni video açılınca da korunur
         private bool isDragging = false;
         private int previousProgressBarValue = -1;
         private CancellationTokenSource? aramaCts;
@@ -53,8 +54,14 @@ namespace VideoKelimeArama
         // Video yanına kaydedilen dizin (görüntü için ".ocr.json", ses için
         // ".asr.json"); sonraki aramalar OCR/Whisper çalıştırmadan bu
         // metinler üzerinde yapılır
+        // Tarama/eşleştirme algoritması değiştiğinde artırılır; sürümü
+        // tutmayan eski dizinler sessizce eski sonuç vermesin diye geçersiz
+        // sayılır ve video yeniden taranır
+        private const int DizinSurumu = 2;
+
         private sealed class OcrDizin
         {
+            public int Surum { get; set; }
             public long DosyaBoyutu { get; set; }
             public DateTime DosyaDegisme { get; set; }
             public double Fps { get; set; }
@@ -177,6 +184,26 @@ namespace VideoKelimeArama
             progressBarvideo.MouseDown += ProgressBar_MouseDown;
             progressBarvideo.MouseMove += ProgressBar_MouseMove;
             progressBarvideo.MouseUp += ProgressBar_MouseUp;
+
+            trbSes.MouseDown += SesCubugu_Fare;
+            trbSes.MouseMove += SesCubugu_Fare;
+        }
+
+        // Ses düzeyi çubuğuna tıklama/sürükleme
+        private void SesCubugu_Fare(object? sender, MouseEventArgs e)
+        {
+            if (e.Button != MouseButtons.Left)
+            {
+                return;
+            }
+
+            int deger = Math.Clamp(e.X * trbSes.Maximum / Math.Max(1, trbSes.Width), 0, trbSes.Maximum);
+            trbSes.Value = deger;
+            sesDuzeyi = deger / 100f;
+            if (sesCihazi != null)
+            {
+                sesCihazi.Volume = sesDuzeyi;
+            }
         }
 
         private static string SureFormatla(double saniye)
@@ -212,6 +239,7 @@ namespace VideoKelimeArama
                 sesOkuyucu = new MediaFoundationReader(videoYolu);
                 sesCihazi = new WaveOutEvent { DesiredLatency = 150 };
                 sesCihazi.Init(sesOkuyucu);
+                sesCihazi.Volume = sesDuzeyi;
             }
             catch
             {
@@ -585,6 +613,7 @@ namespace VideoKelimeArama
             var bilgi = new System.IO.FileInfo(videoYolu);
             var dizin = new OcrDizin
             {
+                Surum = DizinSurumu,
                 DosyaBoyutu = bilgi.Length,
                 DosyaDegisme = bilgi.LastWriteTimeUtc,
                 Fps = fps,
@@ -640,6 +669,42 @@ namespace VideoKelimeArama
             }
 
             return (ornekler, toplamSaniye);
+        }
+
+        private void btnYenidenDizinle_Click(object sender, EventArgs e)
+        {
+            if (string.IsNullOrWhiteSpace(secilenVideoYolu))
+            {
+                MessageBox.Show("Önce bir video dosyası seçin.");
+                return;
+            }
+
+            if (aramaCts != null)
+            {
+                MessageBox.Show("Arama sürerken dizin silinemez. Önce aramayı durdurun.");
+                return;
+            }
+
+            if (MessageBox.Show("Bu videonun kayıtlı görüntü ve ses dizinleri silinecek;\nbir sonraki arama videoyu baştan tarayacak. Devam edilsin mi?",
+                    "Yeniden Dizinle", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes)
+            {
+                return;
+            }
+
+            int silinen = 0;
+            foreach (string uzanti in new[] { ".ocr.json", ".asr.json" })
+            {
+                string yol = secilenVideoYolu + uzanti;
+                if (System.IO.File.Exists(yol))
+                {
+                    System.IO.File.Delete(yol);
+                    silinen++;
+                }
+            }
+
+            MessageBox.Show(silinen > 0
+                ? "Kayıtlı dizinler silindi. Bir sonraki arama videoyu baştan tarayacak."
+                : "Bu video için kayıtlı dizin zaten yok.");
         }
 
         private void btnSonucKaydet_Click(object sender, EventArgs e)
@@ -738,7 +803,7 @@ namespace VideoKelimeArama
                 }
 
                 var dizin = JsonSerializer.Deserialize<OcrDizin>(System.IO.File.ReadAllText(dizinYolu));
-                if (dizin == null)
+                if (dizin == null || dizin.Surum != DizinSurumu)
                 {
                     return null;
                 }
@@ -771,6 +836,7 @@ namespace VideoKelimeArama
             var bilgi = new System.IO.FileInfo(videoYolu);
             var dizin = new OcrDizin
             {
+                Surum = DizinSurumu,
                 DosyaBoyutu = bilgi.Length,
                 DosyaDegisme = bilgi.LastWriteTimeUtc,
                 Fps = fps,
@@ -916,27 +982,29 @@ namespace VideoKelimeArama
         private void ProgressBar_MouseDown(object? sender, MouseEventArgs e)
         {
             isDragging = true;
+            FareKonumunaSar(); // tek tıklamada da o noktaya atla
         }
 
         private void ProgressBar_MouseMove(object? sender, MouseEventArgs e)
         {
             if (isDragging)
             {
-                Point cursor = progressBarvideo.PointToClient(Cursor.Position);
-                int newValue = cursor.X * progressBarvideo.Maximum / progressBarvideo.Width;
+                FareKonumunaSar();
+            }
+        }
 
-                // Yalnızca önceki değer ile farklı bir değeri ayarladığınızda işlem yapın
-                if (newValue != previousProgressBarValue)
-                {
-                    progressBarvideo.Value = Math.Max(0, Math.Min(progressBarvideo.Maximum, newValue));
+        // Videoyu, imlecin sarma çubuğundaki konumuna karşılık gelen kareye taşır
+        private void FareKonumunaSar()
+        {
+            Point cursor = progressBarvideo.PointToClient(Cursor.Position);
+            int newValue = Math.Clamp(cursor.X * progressBarvideo.Maximum / Math.Max(1, progressBarvideo.Width),
+                0, progressBarvideo.Maximum);
 
-                    if (yakalama != null)
-                    {
-                        yakalama.Set(CapProp.PosFrames, progressBarvideo.Value);
-                    }
-
-                    previousProgressBarValue = newValue;
-                }
+            if (newValue != previousProgressBarValue)
+            {
+                progressBarvideo.Value = newValue;
+                yakalama?.Set(CapProp.PosFrames, newValue);
+                previousProgressBarValue = newValue;
             }
         }
 

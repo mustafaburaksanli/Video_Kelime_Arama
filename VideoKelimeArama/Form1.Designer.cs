@@ -42,6 +42,7 @@ namespace VideoKelimeArama
             label5 = new Label();
             lblAraSure = new Label();
             btnSonucKaydet = new ModernButton();
+            btnYenidenDizinle = new ModernButton();
             panelAramaUst = new Panel();
             txtAra = new TextBox();
             btnAra = new ModernButton();
@@ -56,6 +57,8 @@ namespace VideoKelimeArama
             lblSure = new Label();
             lblAyrac = new Label();
             lblVideoSureUzunluk = new Label();
+            lblSes = new Label();
+            trbSes = new ModernBar();
             panelVideo = new Panel();
             pictureBox1 = new PictureBox();
             timerVideo = new System.Windows.Forms.Timer(components);
@@ -170,6 +173,7 @@ namespace VideoKelimeArama
             panelAramaAlt.Controls.Add(label5);
             panelAramaAlt.Controls.Add(lblAraSure);
             panelAramaAlt.Controls.Add(btnSonucKaydet);
+            panelAramaAlt.Controls.Add(btnYenidenDizinle);
             panelAramaAlt.Dock = DockStyle.Bottom;
             panelAramaAlt.Location = new Point(16, 452);
             panelAramaAlt.Name = "panelAramaAlt";
@@ -211,17 +215,31 @@ namespace VideoKelimeArama
             // 
             // btnSonucKaydet
             // 
-            btnSonucKaydet.Anchor = AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
+            btnSonucKaydet.Anchor = AnchorStyles.Bottom | AnchorStyles.Left;
             btnSonucKaydet.FlatStyle = FlatStyle.Flat;
             btnSonucKaydet.ForeColor = Color.FromArgb(232, 232, 242);
             btnSonucKaydet.Location = new Point(0, 66);
             btnSonucKaydet.Name = "btnSonucKaydet";
             btnSonucKaydet.NormalRenk = Color.FromArgb(42, 42, 62);
-            btnSonucKaydet.Size = new Size(368, 38);
+            btnSonucKaydet.Size = new Size(180, 38);
             btnSonucKaydet.TabIndex = 1;
             btnSonucKaydet.Text = "Sonuçları Kaydet";
             btnSonucKaydet.Yaricap = 8;
             btnSonucKaydet.Click += btnSonucKaydet_Click;
+            //
+            // btnYenidenDizinle
+            //
+            btnYenidenDizinle.Anchor = AnchorStyles.Bottom | AnchorStyles.Right;
+            btnYenidenDizinle.FlatStyle = FlatStyle.Flat;
+            btnYenidenDizinle.ForeColor = Color.FromArgb(232, 232, 242);
+            btnYenidenDizinle.Location = new Point(188, 66);
+            btnYenidenDizinle.Name = "btnYenidenDizinle";
+            btnYenidenDizinle.NormalRenk = Color.FromArgb(42, 42, 62);
+            btnYenidenDizinle.Size = new Size(180, 38);
+            btnYenidenDizinle.TabIndex = 2;
+            btnYenidenDizinle.Text = "Yeniden Dizinle";
+            btnYenidenDizinle.Yaricap = 8;
+            btnYenidenDizinle.Click += btnYenidenDizinle_Click;
             // 
             // panelAramaUst
             // 
@@ -300,6 +318,8 @@ namespace VideoKelimeArama
             panelAlt.Controls.Add(lblVideoSureUzunluk);
             panelAlt.Controls.Add(lblFbsbaslik);
             panelAlt.Controls.Add(lblFbs);
+            panelAlt.Controls.Add(lblSes);
+            panelAlt.Controls.Add(trbSes);
             panelAlt.Dock = DockStyle.Bottom;
             panelAlt.Location = new Point(0, 640);
             panelAlt.Name = "panelAlt";
@@ -410,6 +430,25 @@ namespace VideoKelimeArama
             lblVideoSureUzunluk.Size = new Size(56, 25);
             lblVideoSureUzunluk.TabIndex = 7;
             lblVideoSureUzunluk.Text = "00:00";
+            //
+            // lblSes
+            //
+            lblSes.AutoSize = true;
+            lblSes.Font = new Font("Segoe UI", 10.5F);
+            lblSes.ForeColor = Color.FromArgb(140, 146, 168);
+            lblSes.Location = new Point(372, 52);
+            lblSes.Name = "lblSes";
+            lblSes.Text = "🔊";
+            //
+            // trbSes
+            //
+            trbSes.Location = new Point(408, 56);
+            trbSes.Maximum = 100;
+            trbSes.Name = "trbSes";
+            trbSes.Size = new Size(110, 18);
+            trbSes.TabIndex = 8;
+            trbSes.TutamacGoster = true;
+            trbSes.Value = 100;
             // 
             // panelVideo
             // 
@@ -449,7 +488,7 @@ namespace VideoKelimeArama
             Controls.Add(panelUst);
             Font = new Font("Segoe UI", 9.75F);
             ForeColor = Color.FromArgb(232, 232, 242);
-            MinimumSize = new Size(1000, 620);
+            MinimumSize = new Size(1200, 660);
             Name = "Form1";
             Text = "AKAS — Video Kelime Bulucu";
             WindowState = FormWindowState.Maximized;
@@ -483,6 +522,7 @@ namespace VideoKelimeArama
         private Label label5;
         private Label lblAraSure;
         private ModernButton btnSonucKaydet;
+        private ModernButton btnYenidenDizinle;
         private Panel panelAramaUst;
         private TextBox txtAra;
         private ModernButton btnAra;
@@ -497,6 +537,8 @@ namespace VideoKelimeArama
         private Label lblSure;
         private Label lblAyrac;
         private Label lblVideoSureUzunluk;
+        private Label lblSes;
+        private ModernBar trbSes;
         private Panel panelVideo;
         private PictureBox pictureBox1;
         private System.Windows.Forms.Timer timerVideo;
