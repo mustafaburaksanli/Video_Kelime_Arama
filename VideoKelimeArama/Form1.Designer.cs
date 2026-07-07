@@ -478,6 +478,7 @@ namespace VideoKelimeArama
             // 
             // Form1
             // 
+            AcceptButton = btnAra;
             AutoScaleDimensions = new SizeF(120F, 120F);
             AutoScaleMode = AutoScaleMode.Dpi;
             BackColor = Color.FromArgb(24, 24, 37);

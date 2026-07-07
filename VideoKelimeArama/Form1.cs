@@ -496,12 +496,12 @@ namespace VideoKelimeArama
                 return;
             }
 
-            string modelYolu = @"./whisper/ggml-small.bin";
-            if (!System.IO.File.Exists(modelYolu))
+            string modelYolu = System.IO.Path.Combine(AppContext.BaseDirectory, "whisper", "ggml-small.bin");
+            bool modelVar = System.IO.File.Exists(modelYolu);
+            if (!modelVar && MessageBox.Show(
+                    "Sesli arama için Whisper konuşma tanıma modeli gerekli (~466 MB, bir defalık indirme).\nŞimdi indirilsin mi?",
+                    "Ses modeli", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes)
             {
-                MessageBox.Show("Whisper ses modeli bulunamadı.\n\nUygulama klasöründe 'whisper\\ggml-small.bin' dosyası olmalı.\n" +
-                    "İndirme adresi:\nhttps://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin",
-                    "Ses modeli eksik", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
 
@@ -523,6 +523,21 @@ namespace VideoKelimeArama
 
             try
             {
+                if (!modelVar)
+                {
+                    var indirmeIlerleme = new Progress<(long inen, long toplam)>(t =>
+                    {
+                        if (t.toplam > 0)
+                        {
+                            progressBarAra.Maximum = 1000;
+                            progressBarAra.Value = (int)(t.inen * 1000 / t.toplam);
+                        }
+                        string toplamMb = t.toplam > 0 ? (t.toplam / (1024 * 1024)).ToString() : "?";
+                        lblAraSure.Text = $"model {t.inen / (1024 * 1024)}/{toplamMb} MB";
+                    });
+                    await ModelIndir(modelYolu, indirmeIlerleme, aramaCts.Token);
+                }
+
                 var (bulunan, dizindenGeldi) = await SesAramaYap(secilenVideoYolu, dizinYolu, arananKelime,
                     modelYolu, ilerleme, sonucBildirimi, aramaCts.Token);
 
@@ -544,6 +559,50 @@ namespace VideoKelimeArama
                 btnAra.Enabled = true;
                 btnSesAra.Enabled = true;
                 btnAraDurdur.Enabled = false;
+            }
+        }
+
+        // Whisper modelini resmî depodan indirir; yarım dosya model sanılmasın
+        // diye önce geçici ada yazıp bitince taşır
+        private static async Task ModelIndir(string hedefYol,
+            IProgress<(long inen, long toplam)> ilerleme, CancellationToken iptal)
+        {
+            const string adres = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin";
+            System.IO.Directory.CreateDirectory(System.IO.Path.GetDirectoryName(hedefYol)!);
+            string geciciYol = hedefYol + ".indiriliyor";
+
+            try
+            {
+                using var istemci = new HttpClient { Timeout = Timeout.InfiniteTimeSpan };
+                using var yanit = await istemci.GetAsync(adres, HttpCompletionOption.ResponseHeadersRead, iptal);
+                yanit.EnsureSuccessStatusCode();
+                long toplam = yanit.Content.Headers.ContentLength ?? -1;
+
+                await using (var kaynak = await yanit.Content.ReadAsStreamAsync(iptal))
+                await using (var hedef = System.IO.File.Create(geciciYol))
+                {
+                    var tampon = new byte[81920];
+                    long inen = 0, sonRapor = 0;
+                    int okunan;
+                    while ((okunan = await kaynak.ReadAsync(tampon, iptal)) > 0)
+                    {
+                        await hedef.WriteAsync(tampon.AsMemory(0, okunan), iptal);
+                        inen += okunan;
+                        if (inen - sonRapor > 1024 * 1024) // UI'yi megabayt başına bilgilendir
+                        {
+                            ilerleme.Report((inen, toplam));
+                            sonRapor = inen;
+                        }
+                    }
+                    ilerleme.Report((inen, toplam));
+                }
+
+                System.IO.File.Move(geciciYol, hedefYol, true);
+            }
+            catch
+            {
+                try { System.IO.File.Delete(geciciYol); } catch { }
+                throw;
             }
         }
 
@@ -1048,6 +1107,67 @@ namespace VideoKelimeArama
 
         [DllImport("user32.dll", CharSet = CharSet.Unicode)]
         private static extern IntPtr SendMessage(IntPtr pencere, int mesaj, IntPtr wParam, string lParam);
+
+        // Klavye kısayolları: boşluk = oynat/duraklat, sol/sağ ok = 5 sn atlama
+        protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
+        {
+            if (!txtAra.Focused) // arama kutusuna yazarken devreye girmesin
+            {
+                switch (keyData)
+                {
+                    case Keys.Space:
+                        OynatDuraklatDegistir();
+                        return true;
+                    case Keys.Left:
+                        SaniyeAtla(-5);
+                        return true;
+                    case Keys.Right:
+                        SaniyeAtla(5);
+                        return true;
+                }
+            }
+
+            return base.ProcessCmdKey(ref msg, keyData);
+        }
+
+        private void OynatDuraklatDegistir()
+        {
+            if (yakalama == null)
+            {
+                return;
+            }
+
+            if (timerVideo.Enabled)
+            {
+                OynatmayiDuraklat();
+            }
+            else
+            {
+                OynatmayiBaslat();
+            }
+        }
+
+        private void SaniyeAtla(int saniye)
+        {
+            if (yakalama == null)
+            {
+                return;
+            }
+
+            double fps = yakalama.Get(CapProp.Fps);
+            if (fps <= 0) fps = 25;
+            int toplamKare = (int)yakalama.Get(CapProp.FrameCount);
+            int hedefKare = Math.Clamp((int)yakalama.Get(CapProp.PosFrames) + (int)(saniye * fps),
+                0, Math.Max(0, toplamKare - 1));
+
+            yakalama.Set(CapProp.PosFrames, hedefKare);
+            SesiKonumla(hedefKare);
+            if (progressBarvideo.Maximum > 0)
+            {
+                progressBarvideo.Value = Math.Min(hedefKare, progressBarvideo.Maximum);
+            }
+            lblSure.Text = SureFormatla(hedefKare / fps);
+        }
 
         protected override void OnHandleCreated(EventArgs e)
         {
