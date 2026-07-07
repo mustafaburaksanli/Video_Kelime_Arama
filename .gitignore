@@ -361,3 +361,5 @@ MigrationBackup/
 
 # Fody - auto-generated XML schema
 FodyWeavers.xsd
+# Whisper ses modeli (buyuk dosya, GitHub limitini asar - elle indirilir)
+VideoKelimeArama/whisper/*.bin

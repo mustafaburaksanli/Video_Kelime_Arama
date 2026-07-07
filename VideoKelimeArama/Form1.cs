@@ -1,97 +1,303 @@
 using Emgu.CV;
 using Emgu.CV.CvEnum;
-using Emgu.CV.OCR;
 using Emgu.CV.Structure;
-using Emgu.CV.UI;
-using Emgu.CV.Util;
-using System.Drawing;
 using System;
+using System.Drawing;
+using System.Globalization;
+using System.Runtime.InteropServices;
+using System.Text.Json;
 using System.Windows.Forms;
 using NAudio.Wave;
-using System.Collections.Generic;
 using Tesseract;
-using System.Drawing.Imaging;
-using System.Security.Cryptography.X509Certificates;
-using System.Diagnostics;
+using Whisper.net;
+
 namespace VideoKelimeArama
 {
     public partial class Form1 : Form
     {
-        // Gerekli de�i�kenlerin tan�mlanmas�
-        private VideoCapture yakalama;
-        private VideoCapture yakalamaAra;// Video yakalama nesnesi
-        private Mat kare;                    // Video kareleri i�in matris
+        // Gerekli değişkenlerin tanımlanması
+        private VideoCapture? yakalama;          // Oynatma için video yakalama nesnesi
+        private MediaFoundationReader? sesOkuyucu; // Videonun ses izi
+        private WaveOutEvent? sesCihazi;         // Sesi hoparlöre çalan cihaz
+
+        // Oynatma saati: kare seçimi bu pürüzsüz saate göre yapılır; ses
+        // akışının sıçramalı konumu yalnızca büyük sapmada düzeltme için okunur
+        private readonly System.Diagnostics.Stopwatch oynatmaSaati = new();
+        private double oynatmaSaatiTaban; // saat sıfırlandığında medyanın bulunduğu saniye
         private bool isDragging = false;
         private int previousProgressBarValue = -1;
-        private TesseractEngine tesseract;
-        IWavePlayer waveOutDevice;
-        AudioFileReader audioFile;
-        private string arananKelime;
-        private double previousTimestamp = 0;
-        Mat aramaCerceve = new Mat();
-        public string secilenVideoYolu;
+        private CancellationTokenSource? aramaCts;
+        public string? secilenVideoYolu;
+
+        // Arama sonuçları ListBox'a bu nesne olarak eklenir; tıklamada metin
+        // ayrıştırmak yerine doğrudan kare numarasına atlanır.
+        private sealed class AramaSonucu
+        {
+            public string Kelime { get; init; } = "";
+            public int KareNo { get; init; }
+            public double Saniye { get; init; }
+            public string Baglam { get; init; } = "";
+
+            public override string ToString()
+                => $"{SureFormatla(Saniye)}  ——>  {(Baglam.Length > 0 ? Baglam : Kelime)}";
+        }
+
+        // OCR dizininde (önbellek dosyasında) taranan tek karenin kaydı
+        private sealed class OcrKayit
+        {
+            public int KareNo { get; set; }
+            public double Saniye { get; set; }
+            public string Metin { get; set; } = "";
+        }
+
+        // Video yanına kaydedilen dizin (görüntü için ".ocr.json", ses için
+        // ".asr.json"); sonraki aramalar OCR/Whisper çalıştırmadan bu
+        // metinler üzerinde yapılır
+        private sealed class OcrDizin
+        {
+            public long DosyaBoyutu { get; set; }
+            public DateTime DosyaDegisme { get; set; }
+            public double Fps { get; set; }
+            public int ToplamKare { get; set; }
+            public List<OcrKayit> Kayitlar { get; set; } = new();
+        }
+
+        // Kayıtları sırayla değerlendirir: Türkçe harf duyarsız eşleşme,
+        // OCR hatalarına toleranslı bulanık eşleşme ve ekranda kalan
+        // kelimenin ardışık karelerini tek sonuç sayma
+        private sealed class KelimeEslestirici
+        {
+            private readonly string kelime;
+            private readonly int bulanikEsik;
+            private readonly CultureInfo kultur = CultureInfo.GetCultureInfo("tr-TR");
+            private double sonBulunanSaniye = double.NegativeInfinity;
+
+            public int BulunanSayisi { get; private set; }
+
+            public KelimeEslestirici(string kelime)
+            {
+                this.kelime = kelime;
+                // Kısa kelimede tam eşleşme; uzadıkça OCR için 1-2 harf hata payı
+                bulanikEsik = kelime.Any(char.IsWhiteSpace) || kelime.Length <= 4 ? 0
+                            : kelime.Length <= 8 ? 1 : 2;
+            }
+
+            public AramaSonucu? Degerlendir(OcrKayit kayit)
+            {
+                string? baglam = EslesmeBul(kayit.Metin);
+                if (baglam == null)
+                {
+                    return null;
+                }
+
+                bool yeniGorunum = kayit.Saniye - sonBulunanSaniye > 2.0;
+                sonBulunanSaniye = kayit.Saniye;
+                if (!yeniGorunum)
+                {
+                    return null;
+                }
+
+                BulunanSayisi++;
+                return new AramaSonucu { Kelime = kelime, KareNo = kayit.KareNo, Saniye = kayit.Saniye, Baglam = baglam };
+            }
+
+            // Eşleşme varsa kelimenin geçtiği satırı (bağlamı) döndürür, yoksa null
+            private string? EslesmeBul(string metin)
+            {
+                foreach (string hamSatir in metin.Split('\n'))
+                {
+                    string satir = hamSatir.Trim();
+                    if (satir.Length == 0)
+                    {
+                        continue;
+                    }
+
+                    bool eslesti = kultur.CompareInfo.IndexOf(satir, kelime, CompareOptions.IgnoreCase) >= 0;
+
+                    if (!eslesti && bulanikEsik > 0)
+                    {
+                        string kucukKelime = kultur.TextInfo.ToLower(kelime);
+                        foreach (string parca in satir.Split(' ', StringSplitOptions.RemoveEmptyEntries))
+                        {
+                            string sozcuk = parca.Trim('.', ',', ';', ':', '!', '?', '"', '\'', '(', ')', '[', ']');
+                            if (Math.Abs(sozcuk.Length - kelime.Length) <= bulanikEsik &&
+                                LevenshteinMesafesi(kultur.TextInfo.ToLower(sozcuk), kucukKelime) <= bulanikEsik)
+                            {
+                                eslesti = true;
+                                break;
+                            }
+                        }
+                    }
+
+                    if (eslesti)
+                    {
+                        return BaglamKisalt(satir);
+                    }
+                }
+
+                return null;
+            }
+
+            // Satırdaki fazla boşlukları teke indirir, uzunsa sonunu kırpar
+            private static string BaglamKisalt(string satir)
+            {
+                satir = string.Join(' ', satir.Split(' ', StringSplitOptions.RemoveEmptyEntries));
+                return satir.Length <= 60 ? satir : satir[..57] + "...";
+            }
+
+            // İki sözcük arasındaki düzenleme (ekle/sil/değiştir) mesafesi
+            private static int LevenshteinMesafesi(string a, string b)
+            {
+                int[] onceki = new int[b.Length + 1];
+                int[] simdiki = new int[b.Length + 1];
+                for (int j = 0; j <= b.Length; j++)
+                {
+                    onceki[j] = j;
+                }
+
+                for (int i = 1; i <= a.Length; i++)
+                {
+                    simdiki[0] = i;
+                    for (int j = 1; j <= b.Length; j++)
+                    {
+                        int maliyet = a[i - 1] == b[j - 1] ? 0 : 1;
+                        simdiki[j] = Math.Min(Math.Min(simdiki[j - 1] + 1, onceki[j] + 1), onceki[j - 1] + maliyet);
+                    }
+                    (onceki, simdiki) = (simdiki, onceki);
+                }
+
+                return onceki[b.Length];
+            }
+        }
 
         public Form1()
         {
             InitializeComponent();
-            //// ProgressBar s�r�kleme olaylar�
-            //timerVideo.Interval = 40;
-            //timerVideo.Tick += new EventHandler(timerVideo_Tick);
 
             progressBarvideo.MouseDown += ProgressBar_MouseDown;
             progressBarvideo.MouseMove += ProgressBar_MouseMove;
             progressBarvideo.MouseUp += ProgressBar_MouseUp;
         }
 
+        private static string SureFormatla(double saniye)
+        {
+            int dakika = (int)saniye / 60;
+            int sn = (int)saniye % 60;
+            return $"{dakika:D2}:{sn:D2}";
+        }
+
+        private double OynatmaSaniyesi() => oynatmaSaatiTaban + oynatmaSaati.Elapsed.TotalSeconds;
+
+        private void OynatmayiBaslat()
+        {
+            timerVideo.Start();
+            sesCihazi?.Play();
+            oynatmaSaati.Start();
+        }
+
+        private void OynatmayiDuraklat()
+        {
+            timerVideo.Stop();
+            sesCihazi?.Pause();
+            oynatmaSaatiTaban += oynatmaSaati.Elapsed.TotalSeconds; // saati dondur
+            oynatmaSaati.Reset();
+        }
+
+        // Videonun ses izini oynatmaya hazırlar; ses izi yoksa video sessiz oynar
+        private void SesiHazirla(string videoYolu)
+        {
+            SesiKapat();
+            try
+            {
+                sesOkuyucu = new MediaFoundationReader(videoYolu);
+                sesCihazi = new WaveOutEvent { DesiredLatency = 150 };
+                sesCihazi.Init(sesOkuyucu);
+            }
+            catch
+            {
+                SesiKapat();
+            }
+        }
+
+        private void SesiKapat()
+        {
+            sesCihazi?.Stop();
+            sesCihazi?.Dispose();
+            sesCihazi = null;
+            sesOkuyucu?.Dispose();
+            sesOkuyucu = null;
+        }
+
+        // Sesi ve oynatma saatini verilen karenin zamanına konumlandırır
+        private void SesiKonumla(int kareNo)
+        {
+            if (yakalama == null)
+            {
+                return;
+            }
+
+            double fps = yakalama.Get(CapProp.Fps);
+            if (fps <= 0) fps = 25;
+            double saniye = kareNo / fps;
+
+            oynatmaSaatiTaban = saniye;
+            if (oynatmaSaati.IsRunning)
+            {
+                oynatmaSaati.Restart();
+            }
+            else
+            {
+                oynatmaSaati.Reset();
+            }
+
+            if (sesOkuyucu != null)
+            {
+                try
+                {
+                    sesOkuyucu.CurrentTime = TimeSpan.FromSeconds(saniye);
+                }
+                catch
+                {
+                    // Konumlanamazsa ses kaldığı yerden devam eder
+                }
+            }
+        }
+
         private void btnDosyasec_Click(object sender, EventArgs e)
         {
-            // Kullan�c�ya bir video dosyas� se�me i�lemi sunuluyor
+            // Kullanıcıya bir video dosyası seçme işlemi sunuluyor
             OpenFileDialog dosyaAc = new OpenFileDialog();
-            dosyaAc.Title = "Video Se�";
-            dosyaAc.Filter = "Video Dosyalar� (*.mp4, *.avi, *.mkv)|*.mp4;*.avi;*.mkv|T�m Dosyalar (*.*)|*.*";
+            dosyaAc.Title = "Video Seç";
+            dosyaAc.Filter = "Video Dosyaları (*.mp4, *.avi, *.mkv)|*.mp4;*.avi;*.mkv|Tüm Dosyalar (*.*)|*.*";
             dosyaAc.InitialDirectory = Environment.GetFolderPath(Environment.SpecialFolder.MyVideos);
 
             if (dosyaAc.ShowDialog() == DialogResult.OK)
             {
                 secilenVideoYolu = dosyaAc.FileName;
 
-
-
                 if (System.IO.File.Exists(secilenVideoYolu))
                 {
-                    // Se�ilen video dosyas�n�n yolunu etikete ekleyin
+                    // Seçilen video dosyasının yolunu etikete ekleyin
                     label1.Text = secilenVideoYolu;
 
-                    // Video yakalama i�lemi ba�lat�l�r
+                    // Video yakalama işlemi başlatılır
                     yakalama = new VideoCapture(secilenVideoYolu);
-                    yakalamaAra = new VideoCapture(secilenVideoYolu);
-                    // WaveOut waveOut = new WaveOut();
-
-                    // Ses dosyas�n� y�kleyin ve oynatma nesnesine ekleyin
-                    // AudioFileReader audioFile = new AudioFileReader(secilenVideoYolu);
-                    // waveOut.Init(audioFile);
-                    // Ses �almay� ba�lat�n
-                    //  waveOut.Play();
+                    SesiHazirla(secilenVideoYolu);
 
                     HesaplaVeGuncelleVideoSuresi();
-                    timerVideo.Start();
-
+                    SesiKonumla(0);
+                    OynatmayiBaslat();
                 }
                 else
                 {
-                    label1.Text = "Video dosyas� mevcut de�il.";
+                    label1.Text = "Video dosyası mevcut değil.";
                 }
             }
         }
 
-        private void pictureBox1_Click(object sender, EventArgs e)
-        {
-            // PictureBox t�klama olay� (�u anda bo�)
-        }
-
         private void timerVideo_Tick(object sender, EventArgs e)
         {
-            if (yakalama == null)
+            if (yakalama == null || isDragging)
             {
                 return;
             }
@@ -102,177 +308,624 @@ namespace VideoKelimeArama
                 return;
             }
 
-            // �er�eve okuma i�lemini burada yap�n, bu �ekilde �er�eve i�leme maliyeti bir kez �denir
-            Mat frame = new Mat();
+            // Gösterilecek kare pürüzsüz oynatma saatine göre seçilir;
+            // böylece görüntü akıcı kalır ve ses kayması birikmez
+            if (oynatmaSaati.IsRunning)
+            {
+                double fpsSenkron = yakalama.Get(CapProp.Fps);
+                if (fpsSenkron <= 0) fpsSenkron = 25;
+
+                double saat = OynatmaSaniyesi();
+
+                // Saat, sesin gerçek konumundan belirgin saptıysa düzelt
+                if (sesOkuyucu != null && sesCihazi != null && sesCihazi.PlaybackState == PlaybackState.Playing)
+                {
+                    double sesSaniye = sesOkuyucu.CurrentTime.TotalSeconds;
+                    if (Math.Abs(sesSaniye - saat) > 0.5)
+                    {
+                        oynatmaSaatiTaban = sesSaniye;
+                        oynatmaSaati.Restart();
+                        saat = sesSaniye;
+                    }
+                }
+
+                int hedefKare = (int)(saat * fpsSenkron);
+                int gecerliKare = (int)yakalama.Get(CapProp.PosFrames);
+
+                if (hedefKare <= gecerliKare)
+                {
+                    return; // bu karenin zamanı henüz gelmedi
+                }
+
+                // Görüntü geride kaldıysa aradaki kareleri göstermeden atla
+                for (int i = gecerliKare; i < hedefKare - 1; i++)
+                {
+                    if (!yakalama.Grab())
+                    {
+                        break;
+                    }
+                }
+            }
+
+            // Çerçeve okuma işlemini burada yapın, bu şekilde çerçeve işleme maliyeti bir kez ödenir
+            using Mat frame = new Mat();
             if (!yakalama.Read(frame) || frame.IsEmpty)
             {
                 timerVideo.Stop();
+                sesCihazi?.Stop();
+                oynatmaSaati.Reset();
                 yakalama = null;
-                frame.Dispose();
                 return;
             }
 
-            // �er�eveyi boyutland�r ve g�ster
-            using (Mat boyutlanmisKare = new Mat())
+            // Çerçeveyi en-boy oranını koruyarak boyutlandır ve göster
+            Size alan = pictureBox1.ClientSize;
+            if (alan.Width > 8 && alan.Height > 8)
             {
-                CvInvoke.Resize(frame, boyutlanmisKare, pictureBox1.Size);
-                pictureBox1.Image = boyutlanmisKare.ToImage<Bgr, byte>().ToBitmap();
-                boyutlanmisKare.Dispose();
+                double olcek = Math.Min((double)alan.Width / frame.Width, (double)alan.Height / frame.Height);
+                var hedef = new Size(Math.Max(1, (int)(frame.Width * olcek)), Math.Max(1, (int)(frame.Height * olcek)));
+
+                using Mat boyutlanmisKare = new Mat();
+                CvInvoke.Resize(frame, boyutlanmisKare, hedef);
+                using var goruntu = boyutlanmisKare.ToImage<Bgr, byte>();
+                pictureBox1.Image?.Dispose();
+                pictureBox1.Image = goruntu.ToBitmap();
             }
 
-            // ProgressBar'� g�ncelle
+            // ProgressBar'ı güncelle
             int toplamKareSayisi = (int)yakalama.Get(CapProp.FrameCount);
             int gecerliKareNo = (int)yakalama.Get(CapProp.PosFrames);
             progressBarvideo.Maximum = toplamKareSayisi;
-            progressBarvideo.Value = gecerliKareNo;
+            progressBarvideo.Value = Math.Min(gecerliKareNo, toplamKareSayisi);
 
-            // Videonun ilerleme s�resini hesaplay�n
+            // Videonun ilerleme süresini hesaplayın ve etiketi güncelleyin
             double fps = yakalama.Get(CapProp.Fps);
-            double gecenSure = gecerliKareNo / fps;
-
-            // S�reyi dakika ve saniye olarak formatlay�n
-            int dakika = (int)gecenSure / 60;
-            int saniye = (int)gecenSure % 60;
-
-            // Etiketi g�ncelle
-            lblSure.Text = $"{dakika:D2}:{saniye:D2}";
+            lblSure.Text = SureFormatla(gecerliKareNo / fps);
         }
 
         private async void btnAra_Click(object sender, EventArgs e)
         {
-            arananKelime = txtAra.Text;
-            int toplamKareSayisi = (int)yakalamaAra.Get(CapProp.FrameCount);
-            double fps = yakalamaAra.Get(CapProp.Fps);
-
-            if (yakalama != null)
+            if (string.IsNullOrWhiteSpace(secilenVideoYolu) || !System.IO.File.Exists(secilenVideoYolu))
             {
-                // TimerAra'y� ba�lat
-                timerAra.Start();
-                if (!string.IsNullOrEmpty(arananKelime))
-                {
-                    using (TesseractEngine tesseract = new TesseractEngine(@"./tessdata", "tur", EngineMode.Default))
-                    {
-                        while (yakalamaAra.Read(aramaCerceve))
-                        {
-                            if (aramaCerceve.IsEmpty)
-                            {
-                                // Video sona erdi�inde d�ng�den ��k
-                                MessageBox.Show("Arama Bitti");
-                                timerAra.Stop();
-                                break;
-                            }
+                MessageBox.Show("Önce bir video dosyası seçin.");
+                return;
+            }
 
-                            await ProcessFrameAsync(aramaCerceve, tesseract);
-                        }
+            string arananKelime = txtAra.Text.Trim();
+            if (arananKelime.Length == 0)
+            {
+                MessageBox.Show("Aranacak kelimeyi yazın.");
+                return;
+            }
+
+            if (!System.IO.File.Exists(@"./tessdata/tur.traineddata"))
+            {
+                MessageBox.Show("OCR dil dosyası bulunamadı.\n\nUygulama klasöründe 'tessdata\\tur.traineddata' dosyası olmalı.",
+                    "tessdata eksik", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            btnAra.Enabled = false;
+            btnSesAra.Enabled = false;
+            btnAraDurdur.Enabled = true;
+            lstAranankelimekarsilik.Items.Clear();
+            aramaCts = new CancellationTokenSource();
+
+            // Progress<T> geri çağrıları UI iş parçacığında çalışır
+            var ilerleme = new Progress<(int kareNo, int toplamKare, double saniye)>(p =>
+            {
+                progressBarAra.Maximum = p.toplamKare;
+                progressBarAra.Value = Math.Min(p.kareNo, p.toplamKare);
+                lblAraSure.Text = SureFormatla(p.saniye);
+            });
+            var sonucBildirimi = new Progress<AramaSonucu>(s => lstAranankelimekarsilik.Items.Add(s));
+
+            string dizinYolu = secilenVideoYolu + ".ocr.json";
+
+            try
+            {
+                var (bulunan, dizindenGeldi) = await Task.Run(() =>
+                    AramaYap(secilenVideoYolu, dizinYolu, arananKelime, ilerleme, sonucBildirimi, aramaCts.Token));
+
+                string kaynak = dizindenGeldi ? " (kayıtlı OCR dizininden)" : "";
+                MessageBox.Show($"Arama bitti{kaynak}. {bulunan} sonuç bulundu.");
+            }
+            catch (OperationCanceledException)
+            {
+                MessageBox.Show("Arama iptal edildi.");
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("Arama sırasında hata oluştu:\n" + ex.Message);
+            }
+            finally
+            {
+                aramaCts.Dispose();
+                aramaCts = null;
+                btnAra.Enabled = true;
+                btnSesAra.Enabled = true;
+                btnAraDurdur.Enabled = false;
+            }
+        }
+
+        private void btnAraDurdur_Click(object sender, EventArgs e)
+        {
+            aramaCts?.Cancel();
+        }
+
+        private async void btnSesAra_Click(object sender, EventArgs e)
+        {
+            if (string.IsNullOrWhiteSpace(secilenVideoYolu) || !System.IO.File.Exists(secilenVideoYolu))
+            {
+                MessageBox.Show("Önce bir video dosyası seçin.");
+                return;
+            }
+
+            string arananKelime = txtAra.Text.Trim();
+            if (arananKelime.Length == 0)
+            {
+                MessageBox.Show("Aranacak kelimeyi yazın.");
+                return;
+            }
+
+            string modelYolu = @"./whisper/ggml-small.bin";
+            if (!System.IO.File.Exists(modelYolu))
+            {
+                MessageBox.Show("Whisper ses modeli bulunamadı.\n\nUygulama klasöründe 'whisper\\ggml-small.bin' dosyası olmalı.\n" +
+                    "İndirme adresi:\nhttps://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin",
+                    "Ses modeli eksik", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            btnAra.Enabled = false;
+            btnSesAra.Enabled = false;
+            btnAraDurdur.Enabled = true;
+            lstAranankelimekarsilik.Items.Clear();
+            aramaCts = new CancellationTokenSource();
+
+            var ilerleme = new Progress<(int kareNo, int toplamKare, double saniye)>(p =>
+            {
+                progressBarAra.Maximum = Math.Max(1, p.toplamKare);
+                progressBarAra.Value = Math.Min(p.kareNo, progressBarAra.Maximum);
+                lblAraSure.Text = SureFormatla(p.saniye);
+            });
+            var sonucBildirimi = new Progress<AramaSonucu>(s => lstAranankelimekarsilik.Items.Add(s));
+
+            string dizinYolu = secilenVideoYolu + ".asr.json";
+
+            try
+            {
+                var (bulunan, dizindenGeldi) = await SesAramaYap(secilenVideoYolu, dizinYolu, arananKelime,
+                    modelYolu, ilerleme, sonucBildirimi, aramaCts.Token);
+
+                string kaynak = dizindenGeldi ? " (kayıtlı ses dizininden)" : "";
+                MessageBox.Show($"Ses araması bitti{kaynak}. {bulunan} sonuç bulundu.");
+            }
+            catch (OperationCanceledException)
+            {
+                MessageBox.Show("Arama iptal edildi.");
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("Ses araması sırasında hata oluştu:\n" + ex.Message);
+            }
+            finally
+            {
+                aramaCts.Dispose();
+                aramaCts = null;
+                btnAra.Enabled = true;
+                btnSesAra.Enabled = true;
+                btnAraDurdur.Enabled = false;
+            }
+        }
+
+        // Ses aramasının giriş noktası: geçerli bir ses dizini varsa onun
+        // üzerinde anında arar; yoksa sesi çıkarıp Whisper ile yazıya döker,
+        // dizini oluşturur ve kaydeder.
+        private async Task<(int bulunan, bool dizindenGeldi)> SesAramaYap(string videoYolu, string dizinYolu,
+            string arananKelime, string modelYolu, IProgress<(int, int, double)> ilerleme,
+            IProgress<AramaSonucu> sonucBildirimi, CancellationToken iptal)
+        {
+            var eslestirici = new KelimeEslestirici(arananKelime);
+
+            OcrDizin? dizin = DizinYukle(videoYolu, dizinYolu);
+            if (dizin != null)
+            {
+                foreach (OcrKayit kayit in dizin.Kayitlar)
+                {
+                    iptal.ThrowIfCancellationRequested();
+                    AramaSonucu? sonuc = eslestirici.Degerlendir(kayit);
+                    if (sonuc != null)
+                    {
+                        sonucBildirimi.Report(sonuc);
                     }
                 }
 
+                ilerleme.Report((dizin.ToplamKare, dizin.ToplamKare, dizin.ToplamKare / dizin.Fps));
+                return (eslestirici.BulunanSayisi, true);
             }
 
-        }
-
-        private byte[] BitmapToByteArray(Bitmap bitmap)
-        {
-            using (var stream = new System.IO.MemoryStream())
+            dizin = await SesiDizinle(videoYolu, modelYolu, kayit =>
             {
-                bitmap.Save(stream, System.Drawing.Imaging.ImageFormat.Png);
-                return stream.ToArray();
+                AramaSonucu? sonuc = eslestirici.Degerlendir(kayit);
+                if (sonuc != null)
+                {
+                    sonucBildirimi.Report(sonuc);
+                }
+            }, ilerleme, iptal);
+
+            try
+            {
+                System.IO.File.WriteAllText(dizinYolu, JsonSerializer.Serialize(dizin));
+            }
+            catch
+            {
+                // Dizin dosyası yazılamazsa önbelleksiz devam et
+            }
+
+            return (eslestirici.BulunanSayisi, false);
+        }
+
+        // Videonun sesini Whisper ile yazıya döker ve konuşma parçalarından
+        // dizin oluşturur; her parça için kayitOlustu çağrılır.
+        private async Task<OcrDizin> SesiDizinle(string videoYolu, string modelYolu, Action<OcrKayit> kayitOlustu,
+            IProgress<(int, int, double)> ilerleme, CancellationToken iptal)
+        {
+            // Sonuçlara tıklanınca kare numarasına çevirebilmek için videonun FPS'i gerekli
+            double fps;
+            using (var video = new VideoCapture(videoYolu))
+            {
+                fps = video.Get(CapProp.Fps);
+                if (fps <= 0) fps = 25;
+            }
+
+            // Sesi videodan çıkar (16 kHz mono; Whisper'ın beklediği biçim)
+            var (ornekler, toplamSaniye) = await Task.Run(() => SesiCikar(videoYolu), iptal);
+
+            var bilgi = new System.IO.FileInfo(videoYolu);
+            var dizin = new OcrDizin
+            {
+                DosyaBoyutu = bilgi.Length,
+                DosyaDegisme = bilgi.LastWriteTimeUtc,
+                Fps = fps,
+                ToplamKare = (int)(toplamSaniye * fps)
+            };
+
+            using var fabrika = WhisperFactory.FromPath(modelYolu);
+            await using var islemci = fabrika.CreateBuilder()
+                .WithLanguage("tr")
+                .WithThreads(Math.Max(1, Environment.ProcessorCount - 1))
+                .Build();
+
+            await foreach (SegmentData parca in islemci.ProcessAsync(ornekler, iptal))
+            {
+                double saniye = parca.Start.TotalSeconds;
+                var kayit = new OcrKayit
+                {
+                    KareNo = (int)(saniye * fps),
+                    Saniye = saniye,
+                    Metin = parca.Text.Trim()
+                };
+                dizin.Kayitlar.Add(kayit);
+                kayitOlustu(kayit);
+                ilerleme.Report(((int)(parca.End.TotalSeconds * fps), dizin.ToplamKare, parca.End.TotalSeconds));
+            }
+
+            ilerleme.Report((dizin.ToplamKare, dizin.ToplamKare, toplamSaniye));
+            return dizin;
+        }
+
+        // Videonun ses izini 16 kHz mono float örneklere çevirir
+        private static (float[] ornekler, double toplamSaniye) SesiCikar(string videoYolu)
+        {
+            using var okuyucu = new MediaFoundationReader(videoYolu);
+            double toplamSaniye = okuyucu.TotalTime.TotalSeconds;
+
+            var hedefFormat = new WaveFormat(16000, 16, 1);
+            using var donusturucu = new MediaFoundationResampler(okuyucu, hedefFormat);
+
+            using var bellek = new System.IO.MemoryStream();
+            byte[] tampon = new byte[hedefFormat.AverageBytesPerSecond];
+            int okunan;
+            while ((okunan = donusturucu.Read(tampon, 0, tampon.Length)) > 0)
+            {
+                bellek.Write(tampon, 0, okunan);
+            }
+
+            byte[] bayt = bellek.ToArray();
+            var ornekler = new float[bayt.Length / 2];
+            for (int i = 0; i < ornekler.Length; i++)
+            {
+                ornekler[i] = BitConverter.ToInt16(bayt, i * 2) / 32768f;
+            }
+
+            return (ornekler, toplamSaniye);
+        }
+
+        private void btnSonucKaydet_Click(object sender, EventArgs e)
+        {
+            if (lstAranankelimekarsilik.Items.Count == 0)
+            {
+                MessageBox.Show("Kaydedilecek sonuç yok.");
+                return;
+            }
+
+            using var kaydet = new SaveFileDialog
+            {
+                Title = "Sonuçları Kaydet",
+                Filter = "Metin Dosyası (*.txt)|*.txt",
+                FileName = "arama-sonuclari.txt"
+            };
+
+            if (kaydet.ShowDialog() != DialogResult.OK)
+            {
+                return;
+            }
+
+            var satirlar = new List<string>
+            {
+                $"Video  : {secilenVideoYolu}",
+                $"Aranan : {txtAra.Text}",
+                ""
+            };
+            foreach (object oge in lstAranankelimekarsilik.Items)
+            {
+                satirlar.Add(oge.ToString() ?? "");
+            }
+
+            System.IO.File.WriteAllLines(kaydet.FileName, satirlar);
+            MessageBox.Show("Sonuçlar kaydedildi.");
+        }
+
+        // Aramanın giriş noktası (arka plan iş parçacığında çalışır):
+        // geçerli bir OCR dizini varsa onun üzerinde anında arar,
+        // yoksa videoyu tarar, dizini oluşturur ve kaydeder.
+        private (int bulunan, bool dizindenGeldi) AramaYap(string videoYolu, string dizinYolu, string arananKelime,
+            IProgress<(int, int, double)> ilerleme, IProgress<AramaSonucu> sonucBildirimi,
+            CancellationToken iptal)
+        {
+            var eslestirici = new KelimeEslestirici(arananKelime);
+
+            OcrDizin? dizin = DizinYukle(videoYolu, dizinYolu);
+            if (dizin != null)
+            {
+                // Video daha önce dizinlenmiş: OCR olmadan doğrudan metinlerde ara
+                foreach (OcrKayit kayit in dizin.Kayitlar)
+                {
+                    iptal.ThrowIfCancellationRequested();
+                    AramaSonucu? sonuc = eslestirici.Degerlendir(kayit);
+                    if (sonuc != null)
+                    {
+                        sonucBildirimi.Report(sonuc);
+                    }
+                }
+
+                ilerleme.Report((dizin.ToplamKare, dizin.ToplamKare, dizin.ToplamKare / dizin.Fps));
+                return (eslestirici.BulunanSayisi, true);
+            }
+
+            // İlk arama: videoyu tararken eşleşmeleri anında bildir, dizini de oluştur
+            dizin = VideoyuDizinle(videoYolu, kayit =>
+            {
+                AramaSonucu? sonuc = eslestirici.Degerlendir(kayit);
+                if (sonuc != null)
+                {
+                    sonucBildirimi.Report(sonuc);
+                }
+            }, ilerleme, iptal);
+
+            try
+            {
+                System.IO.File.WriteAllText(dizinYolu, JsonSerializer.Serialize(dizin));
+            }
+            catch
+            {
+                // Dizin dosyası yazılamazsa (salt okunur klasör vb.) önbelleksiz devam et
+            }
+
+            return (eslestirici.BulunanSayisi, false);
+        }
+
+        // Kayıtlı OCR dizinini okur; dosya yoksa, bozuksa ya da video
+        // değiştiyse null döner (yeniden tarama gerekir)
+        private static OcrDizin? DizinYukle(string videoYolu, string dizinYolu)
+        {
+            try
+            {
+                if (!System.IO.File.Exists(dizinYolu))
+                {
+                    return null;
+                }
+
+                var dizin = JsonSerializer.Deserialize<OcrDizin>(System.IO.File.ReadAllText(dizinYolu));
+                if (dizin == null)
+                {
+                    return null;
+                }
+
+                var bilgi = new System.IO.FileInfo(videoYolu);
+                if (dizin.DosyaBoyutu != bilgi.Length || dizin.DosyaDegisme != bilgi.LastWriteTimeUtc)
+                {
+                    return null;
+                }
+
+                return dizin;
+            }
+            catch
+            {
+                return null;
             }
         }
+
+        // Videoyu saniyede bir kare OCR'layarak dizinler. Her taranan kare
+        // için kayitOlustu çağrılır; UI'a yalnızca IProgress ile dokunur.
+        private OcrDizin VideoyuDizinle(string videoYolu, Action<OcrKayit> kayitOlustu,
+            IProgress<(int, int, double)> ilerleme, CancellationToken iptal)
+        {
+            using var video = new VideoCapture(videoYolu);
+            double fps = video.Get(CapProp.Fps);
+            if (fps <= 0) fps = 25;
+            int toplamKare = (int)video.Get(CapProp.FrameCount);
+            int adim = Math.Max(1, (int)Math.Round(fps)); // saniyede 1 kare tara
+
+            var bilgi = new System.IO.FileInfo(videoYolu);
+            var dizin = new OcrDizin
+            {
+                DosyaBoyutu = bilgi.Length,
+                DosyaDegisme = bilgi.LastWriteTimeUtc,
+                Fps = fps,
+                ToplamKare = toplamKare
+            };
+
+            using var tesseract = new TesseractEngine(@"./tessdata", "tur", EngineMode.Default);
+            tesseract.DefaultPageSegMode = PageSegMode.SparseText; // metin ekranın herhangi bir yerinde olabilir
+
+            Mat? oncekiGri = null;
+            try
+            {
+                for (int kareNo = 0; kareNo < toplamKare; kareNo += adim)
+                {
+                    iptal.ThrowIfCancellationRequested();
+
+                    video.Set(CapProp.PosFrames, kareNo);
+                    using var kare = new Mat();
+                    if (!video.Read(kare) || kare.IsEmpty)
+                    {
+                        break;
+                    }
+
+                    // Zaman damgası etiketten değil, doğrudan kare numarasından hesaplanır
+                    double saniye = kareNo / fps;
+                    ilerleme.Report((kareNo, toplamKare, saniye));
+
+                    using var gri = new Mat();
+                    CvInvoke.CvtColor(kare, gri, ColorConversion.Bgr2Gray);
+
+                    // Görüntü son OCR'lanan kareyle hemen hemen aynıysa OCR'ı atla
+                    if (oncekiGri != null && oncekiGri.Size == gri.Size)
+                    {
+                        using var fark = new Mat();
+                        CvInvoke.AbsDiff(gri, oncekiGri, fark);
+                        if (CvInvoke.Mean(fark).V0 < 2.0)
+                        {
+                            continue;
+                        }
+                    }
+                    oncekiGri?.Dispose();
+                    oncekiGri = gri.Clone();
+
+                    string metin = KareyiOkut(gri, tesseract);
+
+                    var kayit = new OcrKayit { KareNo = kareNo, Saniye = saniye, Metin = metin };
+                    dizin.Kayitlar.Add(kayit);
+                    kayitOlustu(kayit);
+                }
+            }
+            finally
+            {
+                oncekiGri?.Dispose();
+            }
+
+            ilerleme.Report((toplamKare, toplamKare, toplamKare / fps));
+            return dizin;
+        }
+
+        // Gri tonlamalı kareyi Tesseract için hazırlayıp metne çevirir
+        private static string KareyiOkut(Mat gri, TesseractEngine tesseract)
+        {
+            using var islenmis = new Mat();
+
+            // Düşük çözünürlükte küçük yazılar için görüntüyü büyütmek OCR isabetini artırır
+            if (gri.Height < 720)
+            {
+                CvInvoke.Resize(gri, islenmis, new Size(gri.Width * 2, gri.Height * 2), 0, 0, Inter.Cubic);
+            }
+            else
+            {
+                gri.CopyTo(islenmis);
+            }
+
+            using var esikli = new Mat();
+            CvInvoke.AdaptiveThreshold(islenmis, esikli, 255, AdaptiveThresholdType.GaussianC, ThresholdType.Binary, 11, 2);
+
+            using var goruntu = esikli.ToImage<Gray, byte>();
+            using var bitmap = goruntu.ToBitmap();
+            using var bellek = new System.IO.MemoryStream();
+            bitmap.Save(bellek, System.Drawing.Imaging.ImageFormat.Png);
+
+            using var pix = Pix.LoadFromMemory(bellek.ToArray());
+            using Page sayfa = tesseract.Process(pix);
+            return sayfa.GetText() ?? string.Empty;
+        }
+
         private void btnDur_Click(object sender, EventArgs e)
         {
             if (yakalama != null)
             {
-                timerVideo.Stop(); // Timer'� durdur
+                OynatmayiDuraklat();
             }
         }
 
         private void btnYenidenoynat_Click(object sender, EventArgs e)
         {
-            timerVideo.Stop(); // Timer'� durdur
-            yakalama = new VideoCapture(label1.Text); // Yeni VideoCapture nesnesi olu�turun
-            timerVideo.Start(); // Timer'� tekrar ba�lat
+            if (string.IsNullOrWhiteSpace(secilenVideoYolu))
+            {
+                return;
+            }
+
+            OynatmayiDuraklat();
+            yakalama?.Dispose();
+            yakalama = new VideoCapture(secilenVideoYolu); // Baştan başlat
+            SesiKonumla(0);
+            OynatmayiBaslat();
         }
 
         private void btnDuraklat_Click(object sender, EventArgs e)
         {
             if (yakalama != null)
             {
-                timerVideo.Stop(); // Timer'� durdur
-                yakalama.Dispose(); // VideoCapture nesnesini temizleyin
-                yakalama = new VideoCapture(label1.Text); // Yeni VideoCapture nesnesi olu�turun
-
-                Mat ilkKare = new Mat();
-                yakalama.Read(ilkKare);
-
-                // Ayn� hizalama i�lemini yap�n
-                Mat boyutlanmisKare = new Mat();
-                CvInvoke.Resize(ilkKare, boyutlanmisKare, new System.Drawing.Size(pictureBox1.Width, pictureBox1.Height));
-                pictureBox1.Image = boyutlanmisKare.ToBitmap();
-
-                ilkKare.Dispose(); // Mat nesnesini temizleyin
-                boyutlanmisKare.Dispose(); // Mat nesnesini temizleyin
+                OynatmayiDuraklat();
             }
-        }
-
-        private void progressBarvideo_Click(object sender, EventArgs e)
-        {
-
-        }
-
-        private void lblSure_Click(object sender, EventArgs e)
-        {
-
         }
 
         private void lstAranankelimekarsilik_SelectedIndexChanged(object sender, EventArgs e)
         {
-            if (lstAranankelimekarsilik.SelectedIndex >= 0)
+            if (lstAranankelimekarsilik.SelectedItem is not AramaSonucu sonuc || yakalama == null)
             {
-                // Se�ilen ��eyi al�n
-                string selectedItemText = lstAranankelimekarsilik.SelectedItem.ToString();
-
-                // " -------->>>>>>" ifadesinin sonundan itibaren saniye de�erini al�n
-                int indexOfSeparator = selectedItemText.LastIndexOf(" -------->>>>>>");
-                if (indexOfSeparator >= 0)
-                {
-                    string timePart = selectedItemText.Substring(indexOfSeparator + " -------->>>>>>".Length);
-                    string[] saatDakikaParcalari = timePart.Split(':');
-                    int hedefDakika = int.Parse(saatDakikaParcalari[0]);
-                    int hedefSaniye = int.Parse(saatDakikaParcalari[1]);
-                    int hedefToplamSaniye = (hedefDakika * 60) + hedefSaniye;
-                    double fps = yakalama.Get(CapProp.Fps);
-                    int hedefKareNo = (int)(hedefToplamSaniye * fps);
-                    progressBarvideo.Value = hedefKareNo;
-                    yakalama.Set(CapProp.PosFrames, hedefKareNo);
-                    lblSure.Text = timePart;
-                }
+                return;
             }
+
+            // Videoyu ve sesi sonucun bulunduğu kareye konumlandır
+            yakalama.Set(CapProp.PosFrames, sonuc.KareNo);
+            SesiKonumla(sonuc.KareNo);
+            if (progressBarvideo.Maximum > 0)
+            {
+                progressBarvideo.Value = Math.Min(sonuc.KareNo, progressBarvideo.Maximum);
+            }
+            lblSure.Text = SureFormatla(sonuc.Saniye);
         }
+
         private void btnOynat_Click(object sender, EventArgs e)
         {
             if (yakalama != null)
             {
-                timerVideo.Start(); // Timer'� ba�lat
+                OynatmayiBaslat();
             }
         }
 
-        private void lblFbs_Click(object sender, EventArgs e)
-        {
-
-        }
-        private void ProgressBar_MouseDown(object sender, MouseEventArgs e)
+        private void ProgressBar_MouseDown(object? sender, MouseEventArgs e)
         {
             isDragging = true;
         }
-        private void ProgressBar_MouseMove(object sender, MouseEventArgs e)
+
+        private void ProgressBar_MouseMove(object? sender, MouseEventArgs e)
         {
             if (isDragging)
             {
                 Point cursor = progressBarvideo.PointToClient(Cursor.Position);
                 int newValue = cursor.X * progressBarvideo.Maximum / progressBarvideo.Width;
 
-                // Yaln�zca �nceki de�er ile farkl� bir de�eri ayarlad���n�zda i�lem yap�n
+                // Yalnızca önceki değer ile farklı bir değeri ayarladığınızda işlem yapın
                 if (newValue != previousProgressBarValue)
                 {
                     progressBarvideo.Value = Math.Max(0, Math.Min(progressBarvideo.Maximum, newValue));
@@ -286,135 +939,126 @@ namespace VideoKelimeArama
                 }
             }
         }
-        private void ProgressBar_MouseUp(object sender, MouseEventArgs e)
+
+        private void ProgressBar_MouseUp(object? sender, MouseEventArgs e)
         {
             isDragging = false;
 
             if (yakalama != null)
             {
-                // �lerlemeyi ayarlay�n
+                // İlerlemeyi ayarlayın (ses de aynı ana sarılır)
                 int newPosition = progressBarvideo.Value;
                 yakalama.Set(CapProp.PosFrames, newPosition);
-
+                SesiKonumla(newPosition);
             }
-
         }
 
-        private void lblVideoSureUzunluk_Click(object sender, EventArgs e)
-        {
-
-        }
         private void HesaplaVeGuncelleVideoSuresi()
         {
             if (yakalama != null)
             {
                 double toplamKareSayisi = yakalama.Get(CapProp.FrameCount);
-                double toplamSureSaniye = toplamKareSayisi / yakalama.Get(CapProp.Fps);
+                double fps = yakalama.Get(CapProp.Fps);
+                if (fps <= 0) fps = 25;
+                double toplamSureSaniye = toplamKareSayisi / fps;
 
-                // �stenen FPS de�eri (�rne�in, 25 FPS) belirleyin
-                double istenenFPS = yakalama.Get(CapProp.Fps);
+                // Timer kare süresinin yarısında tikler: kare seçimini saat
+                // yaptığı için sık tik atlama/bekleme kararını inceltir
+                timerVideo.Interval = Math.Max(10, (int)Math.Round(500.0 / fps));
 
-                // Yeni timer interval de�erini hesaplay�n
-                double yeniInterval = 1000.0 / istenenFPS;
-
-                // Timer'�n interval �zelli�ini ayarlay�n
-                timerVideo.Interval = (int)Math.Round(yeniInterval);
-
-                // S�reyi dakika ve saniye olarak formatlay�n
-                int dakika = (int)toplamSureSaniye / 60;
-                int saniye = (int)toplamSureSaniye % 60;
-
-                // Etiketi g�ncelle
-                lblVideoSureUzunluk.Text = $"{dakika:D2}:{saniye:D2}";
-                lblFbs.Text = istenenFPS.ToString();
+                lblVideoSureUzunluk.Text = SureFormatla(toplamSureSaniye);
+                lblFbs.Text = fps.ToString("0.##");
             }
             else
             {
-                lblVideoSureUzunluk.Text = "00:00"; // Video yakalanmad�ysa varsay�lan de�er
+                lblVideoSureUzunluk.Text = "00:00"; // Video yakalanmadıysa varsayılan değer
             }
-
         }
 
+        [DllImport("dwmapi.dll")]
+        private static extern int DwmSetWindowAttribute(IntPtr pencere, int oznitelik, ref int deger, int boyut);
 
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        private static extern IntPtr SendMessage(IntPtr pencere, int mesaj, IntPtr wParam, string lParam);
+
+        protected override void OnHandleCreated(EventArgs e)
+        {
+            base.OnHandleCreated(e);
+
+            // Pencere başlık çubuğunu koyu temaya geçir (Windows 10 1809+)
+            int koyu = 1;
+            _ = DwmSetWindowAttribute(Handle, 20, ref koyu, sizeof(int));
+        }
 
         private void Form1_Load(object sender, EventArgs e)
         {
+            // Arama kutusuna ipucu yazısı (EM_SETCUEBANNER)
+            _ = SendMessage(txtAra.Handle, 0x1501, (IntPtr)1, "Aranacak kelimeyi yazın...");
 
-        }
-
-        private async void timerAra_TickAsync(object sender, EventArgs e)
-        {
-            if (yakalamaAra != null)
+            // Üst çubuktaki AKAS logosunu yükle
+            string logoYolu = System.IO.Path.Combine(AppContext.BaseDirectory, "logo.png");
+            if (System.IO.File.Exists(logoYolu))
             {
-                // Video �er�evelerinin toplam say�s�n� al�n
-                int toplamKareSayisi = (int)yakalamaAra.Get(CapProp.FrameCount);
+                picLogo.Image = Image.FromFile(logoYolu);
+            }
 
-                // Ge�erli �er�eve numaras�n� al�n
-                int gecerliKareNo = (int)yakalamaAra.Get(CapProp.PosFrames);
-
-                // Videonun FPS (kare h�z�) de�erini al�n
-                double fps = yakalamaAra.Get(CapProp.Fps);
-
-                // Ge�en s�reyi hesaplay�n (saniye cinsinden)
-                double gecenSureSaniye = gecerliKareNo / fps;
-
-                // S�reyi dakika ve saniye olarak formatlay�n
-                int dakika = (int)gecenSureSaniye / 60;
-                int saniye = (int)gecenSureSaniye % 60;
-
-                // Etiketi g�ncelle
-                lblAraSure.Text = $"{dakika:D2}:{saniye:D2}";
-                progressBarAra.Maximum = toplamKareSayisi;
-                progressBarAra.Value = gecerliKareNo;
-
-
-
+            // Pencere ve görev çubuğu simgesi
+            string ikonYolu = System.IO.Path.Combine(AppContext.BaseDirectory, "app.ico");
+            if (System.IO.File.Exists(ikonYolu))
+            {
+                Icon = new Icon(ikonYolu);
             }
         }
 
-        private async Task ProcessFrameAsync(Mat frame, TesseractEngine tesseract)
+        // Sonuç listesi öğelerini iki satır (zaman + bağlam) olarak çizer
+        private void lstAranankelimekarsilik_DrawItem(object? sender, DrawItemEventArgs e)
         {
-            await Task.Run(() =>
-               {
-                   using (Image<Bgr, byte> image = frame.ToImage<Bgr, byte>())
-                   {
-                       // G�r�nt�ye maskeleme ve g��lendirme uygula
-                       // �rnek: G�r�nt�y� gri tonlamaya �evir ve adaptif e�ikleme uygula
-                       UMat grayImage = new UMat();
-                       CvInvoke.CvtColor(image, grayImage, ColorConversion.Bgr2Gray);
-                       CvInvoke.AdaptiveThreshold(grayImage, grayImage, 255, AdaptiveThresholdType.GaussianC, ThresholdType.Binary, 11, 2);
+            if (e.Index < 0)
+            {
+                return;
+            }
 
-                       using (Bitmap enhancedBitmap = grayImage.ToImage<Gray, byte>().ToBitmap())
-                       {
-                           var byteArray = BitmapToByteArray(enhancedBitmap);
-                           var pix = Tesseract.Pix.LoadFromMemory(byteArray);
+            bool secili = (e.State & DrawItemState.Selected) != 0;
+            Color arka = secili ? Tema.VurguKoyu : (e.Index % 2 == 0 ? Tema.Yuzey : Tema.YuzeyAcik);
+            using (var firca = new SolidBrush(arka))
+            {
+                e.Graphics.FillRectangle(firca, e.Bounds);
+            }
 
-                           using (Page page = tesseract.Process(pix))
-                           {
-                               string metin = page.GetText();
+            string zaman, metin;
+            if (lstAranankelimekarsilik.Items[e.Index] is AramaSonucu sonuc)
+            {
+                zaman = SureFormatla(sonuc.Saniye);
+                metin = sonuc.Baglam.Length > 0 ? sonuc.Baglam : sonuc.Kelime;
+            }
+            else
+            {
+                zaman = "";
+                metin = lstAranankelimekarsilik.Items[e.Index].ToString() ?? "";
+            }
 
-                               if (metin.Contains(arananKelime))
-                               {
-                                   // lstAranankelimekarsilik kontrol�ne ana i� par�ac��� �zerinden eri�im
-                                   this.Invoke((MethodInvoker)delegate
-                                   {
-                                       lstAranankelimekarsilik.Items.Add(arananKelime + " -------->>>>>>" + lblAraSure.Text);
-                                   });
-                               }
-                           }
-                       }
-                   }
-               });
+            Color zamanRenk = secili ? Color.White : Tema.Vurgu;
+            Color metinRenk = secili ? Color.White : Tema.Metin;
+
+            using var kalinFont = new Font(Font, FontStyle.Bold);
+            TextRenderer.DrawText(e.Graphics, zaman, kalinFont,
+                new Rectangle(e.Bounds.X + 10, e.Bounds.Y + 5, e.Bounds.Width - 20, 18),
+                zamanRenk, TextFormatFlags.Left);
+            TextRenderer.DrawText(e.Graphics, metin, Font,
+                new Rectangle(e.Bounds.X + 10, e.Bounds.Y + 23, e.Bounds.Width - 20, 18),
+                metinRenk, TextFormatFlags.Left | TextFormatFlags.EndEllipsis);
         }
 
-        private void progressBar1_Click(object sender, EventArgs e)
+        protected override void OnFormClosing(FormClosingEventArgs e)
         {
-
+            aramaCts?.Cancel(); // Form kapanırken süren aramayı iptal et
+            SesiKapat();
+            base.OnFormClosing(e);
         }
 
         //private void btnSesAra_Click(object sender, EventArgs e)
         //{
-        //    ConvertAudioFormat(secilenVideoYolu, @"C:\Users\mrcom\OneDrive\Masa�st�\Yeni klas�r (12)");
+        //    ConvertAudioFormat(secilenVideoYolu, @"C:\Users\mrcom\OneDrive\Masaüstü\Yeni klasör (12)");
         //}
         //static void ConvertAudioFormat(string inputFilePath, string outputFilePath)
         //{
@@ -435,7 +1079,7 @@ namespace VideoKelimeArama
         //        process.WaitForExit();
         //    }
 
-        //    MessageBox.Show($"Ses dosyas� d�n��t�r�ld�: {outputFilePath}");
+        //    MessageBox.Show($"Ses dosyası dönüştürüldü: {outputFilePath}");
         //}
 
     }
