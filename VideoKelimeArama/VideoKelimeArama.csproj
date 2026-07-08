@@ -10,6 +10,10 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <InternalsVisibleTo Include="VideoKelimeArama.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
     <PackageReference Include="Emgu.CV" Version="4.8.1.5350" />
     <PackageReference Include="Emgu.CV.runtime.windows" Version="4.8.1.5350" />
     <PackageReference Include="Emgu.CV.UI" Version="4.8.1.5350" />
