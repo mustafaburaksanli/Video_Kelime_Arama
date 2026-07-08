@@ -47,6 +47,7 @@ namespace VideoKelimeArama
             txtAra = new TextBox();
             btnAra = new ModernButton();
             btnSesAra = new ModernButton();
+            btnNesneAra = new ModernButton();
             btnAraDurdur = new ModernButton();
             panelAlt = new Panel();
             progressBarvideo = new ModernBar();
@@ -246,11 +247,12 @@ namespace VideoKelimeArama
             panelAramaUst.Controls.Add(txtAra);
             panelAramaUst.Controls.Add(btnAra);
             panelAramaUst.Controls.Add(btnSesAra);
+            panelAramaUst.Controls.Add(btnNesneAra);
             panelAramaUst.Controls.Add(btnAraDurdur);
             panelAramaUst.Dock = DockStyle.Top;
             panelAramaUst.Location = new Point(16, 12);
             panelAramaUst.Name = "panelAramaUst";
-            panelAramaUst.Size = new Size(368, 110);
+            panelAramaUst.Size = new Size(368, 138);
             panelAramaUst.TabIndex = 3;
             // 
             // txtAra
@@ -269,10 +271,10 @@ namespace VideoKelimeArama
             // 
             btnAra.FlatStyle = FlatStyle.Flat;
             btnAra.ForeColor = Color.FromArgb(232, 232, 242);
-            btnAra.Location = new Point(0, 56);
+            btnAra.Location = new Point(0, 50);
             btnAra.Name = "btnAra";
             btnAra.NormalRenk = Color.FromArgb(137, 116, 255);
-            btnAra.Size = new Size(132, 38);
+            btnAra.Size = new Size(180, 36);
             btnAra.TabIndex = 1;
             btnAra.Text = "Görüntüde Ara";
             btnAra.Yaricap = 8;
@@ -282,24 +284,37 @@ namespace VideoKelimeArama
             // 
             btnSesAra.FlatStyle = FlatStyle.Flat;
             btnSesAra.ForeColor = Color.FromArgb(232, 232, 242);
-            btnSesAra.Location = new Point(140, 56);
+            btnSesAra.Location = new Point(188, 50);
             btnSesAra.Name = "btnSesAra";
             btnSesAra.NormalRenk = Color.FromArgb(0, 176, 155);
-            btnSesAra.Size = new Size(112, 38);
+            btnSesAra.Size = new Size(180, 36);
             btnSesAra.TabIndex = 2;
             btnSesAra.Text = "Seste Ara";
             btnSesAra.Yaricap = 8;
             btnSesAra.Click += btnSesAra_Click;
-            // 
+            //
+            // btnNesneAra
+            //
+            btnNesneAra.FlatStyle = FlatStyle.Flat;
+            btnNesneAra.ForeColor = Color.FromArgb(232, 232, 242);
+            btnNesneAra.Location = new Point(0, 92);
+            btnNesneAra.Name = "btnNesneAra";
+            btnNesneAra.NormalRenk = Color.FromArgb(219, 137, 63);
+            btnNesneAra.Size = new Size(180, 36);
+            btnNesneAra.TabIndex = 6;
+            btnNesneAra.Text = "Nesnede Ara";
+            btnNesneAra.Yaricap = 8;
+            btnNesneAra.Click += btnNesneAra_Click;
+            //
             // btnAraDurdur
-            // 
+            //
             btnAraDurdur.Enabled = false;
             btnAraDurdur.FlatStyle = FlatStyle.Flat;
             btnAraDurdur.ForeColor = Color.FromArgb(232, 232, 242);
-            btnAraDurdur.Location = new Point(260, 56);
+            btnAraDurdur.Location = new Point(188, 92);
             btnAraDurdur.Name = "btnAraDurdur";
             btnAraDurdur.NormalRenk = Color.FromArgb(220, 76, 76);
-            btnAraDurdur.Size = new Size(108, 38);
+            btnAraDurdur.Size = new Size(180, 36);
             btnAraDurdur.TabIndex = 3;
             btnAraDurdur.Text = "Durdur";
             btnAraDurdur.Yaricap = 8;
@@ -491,7 +506,7 @@ namespace VideoKelimeArama
             ForeColor = Color.FromArgb(232, 232, 242);
             MinimumSize = new Size(1200, 660);
             Name = "Form1";
-            Text = "AKAS — Video Kelime Bulucu";
+            Text = "AKAS — Akıllı Kelime Arama Sistemi";
             WindowState = FormWindowState.Maximized;
             Load += Form1_Load;
             panelUst.ResumeLayout(false);
@@ -528,6 +543,7 @@ namespace VideoKelimeArama
         private TextBox txtAra;
         private ModernButton btnAra;
         private ModernButton btnSesAra;
+        private ModernButton btnNesneAra;
         private ModernButton btnAraDurdur;
         private Panel panelAlt;
         private ModernBar progressBarvideo;

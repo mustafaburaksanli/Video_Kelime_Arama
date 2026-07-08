@@ -286,6 +286,7 @@ namespace VideoKelimeArama
 
             btnAra.Enabled = false;
             btnSesAra.Enabled = false;
+            btnNesneAra.Enabled = false;
             btnAraDurdur.Enabled = true;
             lstAranankelimekarsilik.Items.Clear();
             aramaCts = new CancellationTokenSource();
@@ -323,6 +324,7 @@ namespace VideoKelimeArama
                 aramaCts = null;
                 btnAra.Enabled = true;
                 btnSesAra.Enabled = true;
+                btnNesneAra.Enabled = true;
                 btnAraDurdur.Enabled = false;
             }
         }
@@ -358,6 +360,7 @@ namespace VideoKelimeArama
 
             btnAra.Enabled = false;
             btnSesAra.Enabled = false;
+            btnNesneAra.Enabled = false;
             btnAraDurdur.Enabled = true;
             lstAranankelimekarsilik.Items.Clear();
             aramaCts = new CancellationTokenSource();
@@ -386,7 +389,7 @@ namespace VideoKelimeArama
                         string toplamMb = t.toplam > 0 ? (t.toplam / (1024 * 1024)).ToString() : "?";
                         lblAraSure.Text = $"model {t.inen / (1024 * 1024)}/{toplamMb} MB";
                     });
-                    await ModelIndir(modelYolu, indirmeIlerleme, aramaCts.Token);
+                    await DosyaIndir(WhisperModelAdresi, modelYolu, indirmeIlerleme, aramaCts.Token);
                 }
 
                 var (bulunan, dizindenGeldi) = await SesAramaYap(secilenVideoYolu, dizinYolu, arananKelime,
@@ -409,16 +412,18 @@ namespace VideoKelimeArama
                 aramaCts = null;
                 btnAra.Enabled = true;
                 btnSesAra.Enabled = true;
+                btnNesneAra.Enabled = true;
                 btnAraDurdur.Enabled = false;
             }
         }
 
-        // Whisper modelini resmî depodan indirir; yarım dosya model sanılmasın
-        // diye önce geçici ada yazıp bitince taşır
-        private static async Task ModelIndir(string hedefYol,
+        private const string WhisperModelAdresi = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin";
+
+        // Model dosyasını indirir; yarım dosya model sanılmasın diye önce
+        // geçici ada yazıp bitince taşır
+        private static async Task DosyaIndir(string adres, string hedefYol,
             IProgress<(long inen, long toplam)> ilerleme, CancellationToken iptal)
         {
-            const string adres = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin";
             System.IO.Directory.CreateDirectory(System.IO.Path.GetDirectoryName(hedefYol)!);
             string geciciYol = hedefYol + ".indiriliyor";
 
@@ -581,6 +586,267 @@ namespace VideoKelimeArama
             return (ornekler, toplamSaniye);
         }
 
+        private async void btnNesneAra_Click(object sender, EventArgs e)
+        {
+            if (string.IsNullOrWhiteSpace(secilenVideoYolu) || !System.IO.File.Exists(secilenVideoYolu))
+            {
+                MessageBox.Show("Önce bir video dosyası seçin.");
+                return;
+            }
+
+            string arananKelime = txtAra.Text.Trim();
+            if (arananKelime.Length == 0)
+            {
+                MessageBox.Show("Aranacak nesneyi yazın (örn. insan, araba, çanta, köpek...).");
+                return;
+            }
+
+            string modelYolu = System.IO.Path.Combine(AppContext.BaseDirectory, "nesne", NesneTanimlayici.ModelDosyaAdi);
+            bool modelVar = System.IO.File.Exists(modelYolu);
+            if (!modelVar && MessageBox.Show(
+                    "Nesne tanıma modeli gerekli (~4 MB, bir defalık indirme).\nŞimdi indirilsin mi?",
+                    "Nesne modeli", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes)
+            {
+                return;
+            }
+
+            btnAra.Enabled = false;
+            btnSesAra.Enabled = false;
+            btnNesneAra.Enabled = false;
+            btnAraDurdur.Enabled = true;
+            lstAranankelimekarsilik.Items.Clear();
+            aramaCts = new CancellationTokenSource();
+
+            var ilerleme = new Progress<(int kareNo, int toplamKare, double saniye)>(p =>
+            {
+                progressBarAra.Maximum = Math.Max(1, p.toplamKare);
+                progressBarAra.Value = Math.Min(p.kareNo, progressBarAra.Maximum);
+                lblAraSure.Text = SureFormatla(p.saniye);
+            });
+            var sonucBildirimi = new Progress<AramaSonucu>(s => lstAranankelimekarsilik.Items.Add(s));
+
+            string dizinYolu = secilenVideoYolu + ".obj.json";
+
+            try
+            {
+                if (!modelVar)
+                {
+                    var indirmeIlerleme = new Progress<(long inen, long toplam)>(t =>
+                    {
+                        if (t.toplam > 0)
+                        {
+                            progressBarAra.Maximum = 1000;
+                            progressBarAra.Value = (int)(t.inen * 1000 / t.toplam);
+                        }
+                        lblAraSure.Text = $"model {t.inen / (1024 * 1024)} MB";
+                    });
+                    await DosyaIndir(NesneTanimlayici.ModelAdresi, modelYolu, indirmeIlerleme, aramaCts.Token);
+                }
+
+                var (bulunan, dizindenGeldi) = await Task.Run(() =>
+                    NesneAramaYap(secilenVideoYolu, dizinYolu, arananKelime, modelYolu,
+                        ilerleme, sonucBildirimi, aramaCts.Token));
+
+                string kaynak = dizindenGeldi ? " (kayıtlı nesne dizininden)" : "";
+                MessageBox.Show($"Nesne araması bitti{kaynak}. {bulunan} sonuç bulundu.");
+            }
+            catch (OperationCanceledException)
+            {
+                MessageBox.Show("Arama iptal edildi.");
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("Nesne araması sırasında hata oluştu:\n" + ex.Message);
+            }
+            finally
+            {
+                aramaCts.Dispose();
+                aramaCts = null;
+                btnAra.Enabled = true;
+                btnSesAra.Enabled = true;
+                btnNesneAra.Enabled = true;
+                btnAraDurdur.Enabled = false;
+            }
+        }
+
+        // Nesne aramasının giriş noktası: geçerli bir nesne dizini varsa onun
+        // üzerinde anında arar; yoksa videoyu YOLOX ile tarayıp dizini oluşturur
+        private (int bulunan, bool dizindenGeldi) NesneAramaYap(string videoYolu, string dizinYolu,
+            string arananKelime, string modelYolu, IProgress<(int, int, double)> ilerleme,
+            IProgress<AramaSonucu> sonucBildirimi, CancellationToken iptal)
+        {
+            var eslestirici = new KelimeEslestirici(arananKelime);
+
+            void Bildir(OcrKayit kayit)
+            {
+                AramaSonucu? sonuc = eslestirici.Degerlendir(kayit);
+                if (sonuc != null)
+                {
+                    sonuc.Nesne = true;
+                    sonucBildirimi.Report(sonuc);
+                }
+            }
+
+            OcrDizin? dizin = DizinYukle(videoYolu, dizinYolu);
+            if (dizin != null)
+            {
+                foreach (OcrKayit kayit in dizin.Kayitlar)
+                {
+                    iptal.ThrowIfCancellationRequested();
+                    Bildir(kayit);
+                }
+
+                ilerleme.Report((dizin.ToplamKare, dizin.ToplamKare, dizin.ToplamKare / dizin.Fps));
+                return (eslestirici.BulunanSayisi, true);
+            }
+
+            dizin = VideoNesneDizinle(videoYolu, modelYolu, Bildir, ilerleme, iptal);
+
+            try
+            {
+                System.IO.File.WriteAllText(dizinYolu, JsonSerializer.Serialize(dizin));
+            }
+            catch
+            {
+                // Dizin dosyası yazılamazsa önbelleksiz devam et
+            }
+
+            return (eslestirici.BulunanSayisi, false);
+        }
+
+        // Videoyu saniyede bir kare YOLOX'tan geçirerek dizinler; her karenin
+        // metni "2 insan, 1 araba" biçimindedir
+        private OcrDizin VideoNesneDizinle(string videoYolu, string modelYolu, Action<OcrKayit> kayitOlustu,
+            IProgress<(int, int, double)> ilerleme, CancellationToken iptal)
+        {
+            using var video = new VideoCapture(videoYolu);
+            double fps = video.Get(CapProp.Fps);
+            if (fps <= 0) fps = 25;
+            int toplamKare = (int)video.Get(CapProp.FrameCount);
+            int adim = Math.Max(1, (int)Math.Round(fps));
+
+            var bilgi = new System.IO.FileInfo(videoYolu);
+            var dizin = new OcrDizin
+            {
+                Surum = OcrDizin.GuncelSurum,
+                DosyaBoyutu = bilgi.Length,
+                DosyaDegisme = bilgi.LastWriteTimeUtc,
+                Fps = fps,
+                ToplamKare = toplamKare
+            };
+
+            using var tanimlayici = new NesneTanimlayici(modelYolu);
+
+            Mat? oncekiGri = null;
+            try
+            {
+                for (int kareNo = 0; kareNo < toplamKare; kareNo += adim)
+                {
+                    iptal.ThrowIfCancellationRequested();
+
+                    video.Set(CapProp.PosFrames, kareNo);
+                    using var kare = new Mat();
+                    if (!video.Read(kare) || kare.IsEmpty)
+                    {
+                        break;
+                    }
+
+                    double saniye = kareNo / fps;
+                    ilerleme.Report((kareNo, toplamKare, saniye));
+
+                    using var gri = new Mat();
+                    CvInvoke.CvtColor(kare, gri, ColorConversion.Bgr2Gray);
+
+                    // Görüntü son işlenen kareyle hemen hemen aynıysa tespiti atla
+                    if (oncekiGri != null && oncekiGri.Size == gri.Size)
+                    {
+                        using var fark = new Mat();
+                        CvInvoke.AbsDiff(gri, oncekiGri, fark);
+                        if (CvInvoke.Mean(fark).V0 < 2.0)
+                        {
+                            continue;
+                        }
+                    }
+                    oncekiGri?.Dispose();
+                    oncekiGri = gri.Clone();
+
+                    string metin = NesneTanimlayici.TespitleriMetneCevir(tanimlayici.Tespit(kare));
+
+                    var kayit = new OcrKayit { KareNo = kareNo, Saniye = saniye, Metin = metin };
+                    dizin.Kayitlar.Add(kayit);
+                    kayitOlustu(kayit);
+                }
+            }
+            finally
+            {
+                oncekiGri?.Dispose();
+            }
+
+            ilerleme.Report((toplamKare, toplamKare, toplamKare / fps));
+            return dizin;
+        }
+
+        // Kareyi görüntüleme boyutunda çizer; aranan nesne karede yeniden
+        // tespit edilip adı ve güven yüzdesiyle kutu içine alınır
+        private static Bitmap? KareyiNesneVurgula(string videoYolu, int kareNo, string kelime, Size alan)
+        {
+            if (alan.Width < 8 || alan.Height < 8)
+            {
+                return null;
+            }
+
+            using var video = new VideoCapture(videoYolu);
+            video.Set(CapProp.PosFrames, kareNo);
+            using var kare = new Mat();
+            if (!video.Read(kare) || kare.IsEmpty)
+            {
+                return null;
+            }
+
+            double olcek = Math.Min((double)alan.Width / kare.Width, (double)alan.Height / kare.Height);
+            var hedef = new Size(Math.Max(1, (int)(kare.Width * olcek)), Math.Max(1, (int)(kare.Height * olcek)));
+            using var boyutlu = new Mat();
+            CvInvoke.Resize(kare, boyutlu, hedef);
+            using var img = boyutlu.ToImage<Bgr, byte>();
+            Bitmap bitmap = img.ToBitmap();
+
+            try
+            {
+                string modelYolu = System.IO.Path.Combine(AppContext.BaseDirectory, "nesne", NesneTanimlayici.ModelDosyaAdi);
+                if (System.IO.File.Exists(modelYolu))
+                {
+                    using var tanimlayici = new NesneTanimlayici(modelYolu);
+                    var eslestirici = new KelimeEslestirici(kelime);
+
+                    using var cizim = Graphics.FromImage(bitmap);
+                    using var kalem = new Pen(Tema.Turkuaz, 3);
+                    using var yaziFirca = new SolidBrush(Tema.Turkuaz);
+                    using var yaziFont = new Font("Segoe UI", 10f, FontStyle.Bold);
+
+                    foreach (NesneTespiti tespit in tanimlayici.Tespit(kare))
+                    {
+                        if (!eslestirici.SozcukUyuyorMu(tespit.Sinif))
+                        {
+                            continue;
+                        }
+
+                        var cerceve = Rectangle.Round(new RectangleF(
+                            (float)(tespit.Kutu.X * olcek), (float)(tespit.Kutu.Y * olcek),
+                            (float)(tespit.Kutu.Width * olcek), (float)(tespit.Kutu.Height * olcek)));
+                        cizim.DrawRectangle(kalem, cerceve);
+                        cizim.DrawString($"{tespit.Sinif} %{tespit.Guven * 100:0}", yaziFont, yaziFirca,
+                            cerceve.X, Math.Max(0, cerceve.Y - 20));
+                    }
+                }
+            }
+            catch
+            {
+                // Vurgu çizilemezse sade kare gösterilir
+            }
+
+            return bitmap;
+        }
+
         private void btnYenidenDizinle_Click(object sender, EventArgs e)
         {
             if (string.IsNullOrWhiteSpace(secilenVideoYolu))
@@ -602,7 +868,7 @@ namespace VideoKelimeArama
             }
 
             int silinen = 0;
-            foreach (string uzanti in new[] { ".ocr.json", ".asr.json" })
+            foreach (string uzanti in new[] { ".ocr.json", ".asr.json", ".obj.json" })
             {
                 string yol = secilenVideoYolu + uzanti;
                 if (System.IO.File.Exists(yol))
@@ -918,7 +1184,9 @@ namespace VideoKelimeArama
             {
                 string videoYolu = secilenVideoYolu;
                 Size alan = pictureBox1.ClientSize;
-                Bitmap? goruntu = await Task.Run(() => KareyiVurgula(videoYolu, sonuc.KareNo, sonuc.Kelime, alan));
+                Bitmap? goruntu = await Task.Run(() => sonuc.Nesne
+                    ? KareyiNesneVurgula(videoYolu, sonuc.KareNo, sonuc.Kelime, alan)
+                    : KareyiVurgula(videoYolu, sonuc.KareNo, sonuc.Kelime, alan));
                 if (goruntu != null)
                 {
                     pictureBox1.Image?.Dispose();

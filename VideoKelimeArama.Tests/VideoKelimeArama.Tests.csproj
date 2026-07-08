@@ -18,4 +18,8 @@
     <ProjectReference Include="..\VideoKelimeArama\VideoKelimeArama.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <None Include="varlik\**\*" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>

@@ -1,11 +1,12 @@
-# AKAS — Video Kelime Bulucu
+# AKAS — Akıllı Kelime Arama Sistemi 
 
-Video içinde kelime arayan Windows uygulaması. Bir video seçin, bir kelime yazın:
+Video içinde arama yapan Windows uygulaması. Bir video seçin, bir kelime yazın:
 
 - **Görüntüde Ara** — ekranda görünen yazıları (altyazı, haber bandı, sunum metni…) OCR ile tarar,
-- **Seste Ara** — konuşmaları yapay zekâ ile yazıya döker ve içinde arar.
+- **Seste Ara** — konuşmaları yapay zekâ ile yazıya döker ve içinde arar,
+- **Nesnede Ara** — karelerde görünen nesneleri (insan, araba, çanta, köpek… 80 sınıf) tanır ve arar.
 
-Kelimenin geçtiği her an, bağlam cümlesiyle birlikte listelenir; sonuca tıklayınca video (sesiyle birlikte) o âna atlar.
+Aranan şeyin geçtiği her an, bağlam bilgisiyle listelenir; sonuca tıklayınca video (sesiyle birlikte) o âna atlar ve kelime/nesne kare üzerinde kutu içine alınır.
 
 ![AKAS arayüzü](docs/arayuz.png)
 
@@ -14,6 +15,7 @@ Kelimenin geçtiği her an, bağlam cümlesiyle birlikte listelenir; sonuca tık
 - **Hızlı görüntü taraması**: saniyede bir kare + değişmeyen kareleri atlama; kare zamanından hesaplanan doğru zaman damgaları
 - **Akıllı eşleşme**: Türkçe kurallarına göre harf duyarsız arama (İ/ı dahil) ve OCR'ın 1-2 harf yanlış okuduğu kelimeleri de yakalayan bulanık eşleşme
 - **Sesli arama**: [Whisper](https://github.com/ggerganov/whisper.cpp) ile tamamen çevrimdışı Türkçe konuşma tanıma (model ilk kullanımda uygulama içinden indirilir, ~466 MB)
+- **Nesne araması**: [YOLOX](https://github.com/Megvii-BaseDetection/YOLOX) ile çevrimdışı nesne tespiti; 80 COCO sınıfı Türkçe adlarıyla aranır, sonuçlar "2 insan, 1 araba" biçiminde bağlam taşır (model depoya dahildir, ~4 MB)
 - **Dizinleme**: her video bir kez taranır; sonuçlar video yanına `.ocr.json` / `.asr.json` olarak kaydedilir, sonraki aramalar anında biter. Video değişirse veya algoritma güncellenirse dizin otomatik yenilenir; "Yeniden Dizinle" ile elle de sıfırlanabilir
 - **Senkron oynatıcı**: görüntü + ses birlikte; pürüzsüz oynatma saati, tıkla/sürükle-atla, ses düzeyi kontrolü
 - **Klavye kısayolları**: `Boşluk` oynat/duraklat · `←`/`→` 5 saniye atlama · `Enter` arama
@@ -49,5 +51,6 @@ Ya da `VideoKelimeArama.sln` dosyasını Visual Studio ile açıp F5.
 | [Emgu.CV](https://www.emgu.com) (OpenCV) | Video kare okuma ve görüntü işleme |
 | [Tesseract](https://github.com/charlesw/tesseract) | Ekran yazısı tanıma (OCR) |
 | [Whisper.net](https://github.com/sandrohanea/whisper.net) (whisper.cpp) | Konuşma tanıma |
+| [YOLOX](https://github.com/Megvii-BaseDetection/YOLOX) + [ONNX Runtime](https://onnxruntime.ai) | Nesne tespiti |
 | [NAudio](https://github.com/naudio/NAudio) | Ses çalma ve videodan ses çıkarma |
 | .NET 8 / Windows Forms | Arayüz |

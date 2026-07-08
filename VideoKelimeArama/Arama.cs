@@ -21,6 +21,7 @@ namespace VideoKelimeArama
         public int KareNo { get; init; }
         public double Saniye { get; init; }
         public string Baglam { get; init; } = "";
+        public bool Nesne { get; set; } // sonuç nesne aramasından mı geldi (vurgu için)
 
         public override string ToString()
             => $"{Sure.Formatla(Saniye)}  ——>  {(Baglam.Length > 0 ? Baglam : Kelime)}";
